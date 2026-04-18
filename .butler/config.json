@@ -1,0 +1,12 @@
+﻿{
+    "assistant_name":  "BUTLER",
+    "ollama_url":  "http://127.0.0.1:11434",
+    "model":  "gemma:2b",
+    "allowed_roots":  [
+
+                      ],
+    "confirm_writes":  true,
+    "max_file_bytes":  512000,
+    "tool_timeout_seconds":  10,
+    "max_tool_iterations":  6
+}
