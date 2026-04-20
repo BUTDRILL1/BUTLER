@@ -2,24 +2,33 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+import re
+import time
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from butler.agent.parsing import ParseError, parse_action_outcome_with_normalization
 from butler.agent.prompting import (
     build_chat_system_prompt,
     build_repair_prompt_format,
-    build_repair_prompt_schema,
     build_system_prompt,
-    build_router_system_prompt,
 )
-from butler.agent.provider import OllamaProvider
+from butler.agent.provider import GeminiProvider, OllamaProvider
 from butler.agent.schema import ClarifyAction, FinalAction, ToolCallAction
 from butler.config import ButlerConfig
 from butler.db import ButlerDB
 from butler.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+_FACTUAL_CLEAN_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"^(?:can you|could you|would you|will you|please)\s+", re.IGNORECASE),
+    re.compile(r"^(?:show me|tell me|read me|give me|find me|look up|search for|check)\s+", re.IGNORECASE),
+    re.compile(r"^(?:what is|what's|whats|what are|who is|who's)\s+", re.IGNORECASE),
+    re.compile(r"^(?:top\s+\d+\s+)?(?:latest|current|today's|today|recent)\s+", re.IGNORECASE),
+]
+_RE_HEADLINE = re.compile(r"\bheadline\b", re.IGNORECASE)
+_RE_SPACES = re.compile(r"\s+")
 
 
 class AgentError(Exception):
@@ -48,12 +57,6 @@ def _looks_like_plain_text(text: str) -> bool:
 def _looks_like_refusal(text: str) -> bool:
     t = text.strip().lower()
     return any(p in t for p in _REFUSAL_PHRASES)
-
-
-def _validation_hint(error: ParseError) -> str:
-    if error.validation_error_count > 0:
-        return f"Schema validation failed with {error.validation_error_count} missing/invalid fields."
-    return error.message
 
 
 def _log_parse_event(
@@ -90,8 +93,35 @@ def _has_entity(text: str) -> bool:
 
 def _needs_external_info(text: str) -> bool:
     t = text.lower()
-    strong = ["latest", "news", "current", "today", "recent", "price", "release", "update"]
-    weak = ["who is", "who was", "what is", "what are", "when was", "where is", "compare", "difference", "know about", "tell me about", "explain"]
+    strong = [
+        "latest",
+        "news",
+        "current",
+        "today",
+        "today's",
+        "yesterday",
+        "recent",
+        "price",
+        "release",
+        "update",
+        "speech",
+        "headline",
+        "headlines",
+        "breaking",
+    ]
+    weak = [
+        "who is",
+        "who was",
+        "what is",
+        "what are",
+        "when was",
+        "where is",
+        "compare",
+        "difference",
+        "know about",
+        "tell me about",
+        "explain",
+    ]
 
     if any(w in t for w in strong):
         return True
@@ -109,15 +139,91 @@ def _select_tool(query: str) -> str:
     return "web.search"
 
 
-def _fast_classify(text: str) -> str | None:
+def _looks_like_casual_chat(text: str) -> bool:
     t = text.lower().strip()
     greetings = ["hi", "hello", "hey", "good morning", "good evening", "bye", "thanks", "thank you"]
     if any(t == g or t.startswith(g + " ") or t.startswith(g + ",") for g in greetings):
         if "?" not in t and not _needs_external_info(text):
-            return "CHAT"
+            return True
+
+    casual_phrases = (
+        "do you know my name",
+        "who am i",
+        "how are you",
+        "what's up",
+        "whats up",
+        "tell me about yourself",
+        "what can you do",
+        "are you there",
+        "can we chat",
+        "how's it going",
+        "hows it going",
+        "remember my name",
+    )
+    if any(phrase in t for phrase in casual_phrases):
+        return True
+
+    if t.startswith("say ") and any(word in t for word in ("hi", "hello", "hey", "thanks", "thank you")):
+        return True
+    return False
+
+
+def _looks_like_action_request(text: str) -> bool:
+    t = text.lower()
+    return any(
+        word in t
+        for word in (
+            "search",
+            "find",
+            "index",
+            "note",
+            "notes",
+            "file",
+            "files",
+            "read",
+            "list",
+            "roots",
+            "config",
+            "summarize",
+            "summary",
+            "recap",
+            "details",
+        )
+    )
+
+
+def _looks_like_weather_request(text: str) -> bool:
+    t = text.lower()
+    weather_terms = ("weather", "forecast", "temperature", "rain", "raining", "sunny", "humidity", "wind", "snow", "storm", "precipitation")
+    return any(term in t for term in weather_terms)
+
+
+def _classify_turn(text: str) -> tuple[str, str]:
+    if _looks_like_casual_chat(text):
+        return "CHAT", "casual_chat"
+    if _looks_like_weather_request(text):
+        return "ACTION", "weather_request"
     if _needs_external_info(text):
-        return "ACTION"
-    return None
+        return "FACTUAL_SEARCH", "current_or_recent_info"
+    if _looks_like_action_request(text):
+        return "ACTION", "tool_request"
+    return "ACTION", "default_action"
+
+
+def _clean_factual_search_query(text: str) -> str:
+    cleaned = text.strip()
+    changed = True
+    while changed:
+        changed = False
+        for pattern in _FACTUAL_CLEAN_PATTERNS:
+            new_cleaned = pattern.sub("", cleaned)
+            if new_cleaned != cleaned:
+                cleaned = new_cleaned.strip()
+                changed = True
+
+    cleaned = _RE_HEADLINE.sub("headlines", cleaned)
+    cleaned = _RE_SPACES.sub(" ", cleaned).strip(" .,:;?-")
+    return cleaned or text.strip()
 
 
 @dataclass
@@ -125,115 +231,174 @@ class AgentRuntime:
     config: ButlerConfig
     db: ButlerDB
     tools: ToolRegistry
-    provider: OllamaProvider | None = None
+    provider: Any = None
     conversation_id: str | None = None
     confirm_tool: Callable[[str, dict[str, Any]], bool] | None = None
+    _action_system_prompt: str = field(init=False, repr=False, compare=False, default="")
+    _chat_system_prompt: str = field(init=False, repr=False, compare=False, default="")
+    _has_chat_stream: bool = field(init=False, repr=False, compare=False, default=False)
 
     def __post_init__(self) -> None:
         if self.provider is None:
-            self.provider = OllamaProvider(
-                base_url=self.config.ollama_url,
-                timeout_seconds=self.config.model_timeout_seconds,
-                retry_count=self.config.model_retry_count,
-                total_timeout_seconds=self.config.model_total_timeout_seconds,
-            )
+            if self.config.provider == "gemini":
+                self.provider = GeminiProvider(
+                    api_key=self.config.gemini_api_key,
+                    model=self.config.model,
+                    timeout_seconds=self.config.model_timeout_seconds,
+                    retry_count=self.config.model_retry_count,
+                    total_timeout_seconds=self.config.model_total_timeout_seconds,
+                )
+            else:
+                self.provider = OllamaProvider(
+                    base_url=self.config.ollama_url,
+                    model=self.config.model,
+                    timeout_seconds=self.config.model_timeout_seconds,
+                    retry_count=self.config.model_retry_count,
+                    total_timeout_seconds=self.config.model_total_timeout_seconds,
+                )
+        self._action_system_prompt = build_system_prompt(
+            assistant_name=self.config.assistant_name,
+            tools=self.tools.describe(),
+        )
+        self._chat_system_prompt = build_chat_system_prompt(assistant_name=self.config.assistant_name)
+        self._has_chat_stream = hasattr(self.provider, "chat_stream")
         if self.conversation_id is None:
             existing = self.db.get_last_conversation(max_age_hours=24)
             self.conversation_id = existing or self.db.new_conversation()
 
-    def _model_messages(self) -> list[dict[str, Any]]:
+    def _chat_history_messages(self, limit: int = 3) -> list[dict[str, Any]]:
         assert self.conversation_id is not None
-        system = build_system_prompt(assistant_name=self.config.assistant_name, tools=self.tools.describe())
-        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        history = self.db.list_messages(self.conversation_id)
-        messages.extend(history[-10:])
-        return messages
+        history = self.db.list_messages(self.conversation_id, limit=max(1, limit * 2))
+        filtered: list[dict[str, Any]] = []
+        for message in history:
+            role = message.get("role", "")
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                continue
+            stripped = content.strip()
+            if stripped.startswith("{") or stripped.startswith("TOOL_"):
+                continue
+            if role == "assistant" and _looks_like_refusal(content):
+                continue
+            filtered.append(message)
+        return filtered[-limit:]
+
+    def _provider_chat(self, messages: list[dict[str, Any]], *, temperature: float, model: str) -> str:
+        return self.provider.chat(messages, temperature=temperature, model=model)
+
+    def _provider_chat_stream(self, messages: list[dict[str, Any]], *, temperature: float, model: str) -> Any:
+        if self._has_chat_stream:
+            yield from self.provider.chat_stream(messages, temperature=temperature, model=model)
+            return
+        yield self._provider_chat(messages, temperature=temperature, model=model)
 
     def _chat_mode_reply(self, model: str, user_text: str) -> str:
-        system = build_chat_system_prompt(assistant_name=self.config.assistant_name)
-        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        history = self.db.list_messages(self.conversation_id)
-        messages.extend(history[-10:])
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._chat_system_prompt}]
+        messages.extend(self._chat_history_messages())
         try:
-            return self.provider.chat(model, messages, temperature=0.2)
+            return self._provider_chat(messages, temperature=0.2, model=model)
         except Exception as e:  # noqa: BLE001
             logger.warning("chat_mode_failed model=%s error=%s", model, e)
-            return "Apologies, Boss. I couldn't process that. Could you rephrase?"
+            return "Sorry, I had trouble understanding that. Try rephrasing."
 
     def _chat_mode_reply_stream(self, model: str) -> Any:
-        system = build_chat_system_prompt(assistant_name=self.config.assistant_name)
-        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        history = self.db.list_messages(self.conversation_id)
-        messages.extend(history[-10:])
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._chat_system_prompt}]
+        messages.extend(self._chat_history_messages())
         try:
-            yield from self.provider.chat_stream(model, messages, temperature=0.2)
+            started = time.perf_counter()
+            first_token = True
+            for token in self._provider_chat_stream(messages, temperature=0.2, model=model):
+                if first_token:
+                    logger.info(
+                        "chat_first_token conversation_id=%s model=%s latency_ms=%d",
+                        self.conversation_id,
+                        model,
+                        int((time.perf_counter() - started) * 1000),
+                    )
+                    first_token = False
+                yield token
         except Exception as e:
             logger.warning("chat_stream_failed model=%s error=%s", model, e)
-            yield "Apologies, Boss. I couldn't process that. Could you rephrase?"
+            yield "Sorry, I had trouble understanding that. Try rephrasing."
 
     def _stream_summarize(self, user_text: str, results_json: dict) -> Any:
-        system = build_chat_system_prompt(assistant_name=self.config.assistant_name)
-        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        history = self.db.list_messages(self.conversation_id)
-        messages.extend(history[-6:])
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._chat_system_prompt}]
         messages.append({
             "role": "user",
             "content": (
-                f"The user asked: \"{user_text}\"\n\n"
-                "Here are search results. Summarize them into a concise, helpful answer.\n"
-                "Only use information from these results. Cite sources when relevant.\n\n"
+                f"Boss asked: \"{user_text}\"\n\n"
+                "Here are the search results. Reply directly to Boss in your normal BUTLER persona. Start your response immediately with the answer. Do not use preambles like 'I understand' or 'Here are the results'. Extract the direct answer, not a source list.\n"
+                "If the results show weather, give the current conditions directly.\n"
+                "If the results show news, give the most relevant answer or the top 3 headlines.\n"
+                "Only use information from these results. Mention sources briefly only when helpful.\n\n"
                 f"RESULTS:\n{json.dumps(results_json, ensure_ascii=False)}"
             )
         })
         try:
-            yield from self.provider.chat_stream(
-                self.config.smart_model, messages, temperature=0.2
-            )
+            started = time.perf_counter()
+            first_token = True
+            for token in self._provider_chat_stream(messages, temperature=0.2, model=self.config.chat_model):
+                if first_token:
+                    logger.info(
+                        "factual_search_first_token conversation_id=%s model=%s latency_ms=%d",
+                        self.conversation_id,
+                        self.config.chat_model,
+                        int((time.perf_counter() - started) * 1000),
+                    )
+                    first_token = False
+                yield token
         except Exception as e:
             logger.warning("stream_summarize_failed error=%s", e)
-            yield "No luck finding that one, Boss. Try rephrasing or being more specific."
+            yield self._chat_mode_reply(self.config.chat_model, user_text)
 
-    def _route_prompt(self, user_text: str) -> str:
-        system = build_router_system_prompt()
-        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        history = self.db.list_messages(self.conversation_id)
-        # Limit router context to last 4 messages to keep classification focused
-        messages.extend(history[-4:])
-        try:
-            decision = self.provider.chat(self.config.fast_model, messages, temperature=0.0).strip().upper()
-        except Exception as e:
-            logger.warning("route_failed model=%s error=%s", self.config.fast_model, e)
-            return "ACTION"
-            
-        if decision not in ("CHAT", "ACTION"):
-            return "ACTION"
-        return decision
+    def _log_turn_route(self, user_text: str, route: str, reason: str) -> None:
+        logger.info(
+            "turn_route conversation_id=%s route=%s reason=%s chars=%d",
+            self.conversation_id,
+            route,
+            reason,
+            len(user_text.strip()),
+        )
 
     def chat_once(self, user_text: str) -> str:
         return "".join(list(self.chat_once_stream(user_text)))
 
     def chat_once_stream(self, user_text: str) -> Any:
+        try:
+            yield from self._chat_once_stream_impl(user_text)
+        finally:
+            self.db.flush_turn()
+
+    def _chat_once_stream_impl(self, user_text: str) -> Any:
         assert self.conversation_id is not None
+        turn_started = time.perf_counter()
         self.db.add_message(self.conversation_id, "user", user_text)
 
-        route = _fast_classify(user_text)
-        if route is None:
-            route = self._route_prompt(user_text)
+        route, reason = _classify_turn(user_text)
+        self._log_turn_route(user_text, route, reason)
 
         if route == "CHAT":
             full_response = ""
-            for token in self._chat_mode_reply_stream(self.config.smart_model):
+            for token in self._chat_mode_reply_stream(self.config.chat_model):
                 full_response += token
                 yield token
             self.db.add_message(self.conversation_id, "assistant", full_response)
+            logger.info(
+                "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=chat",
+                self.conversation_id,
+                route,
+                int((time.perf_counter() - turn_started) * 1000),
+            )
             return
 
         # Pre-Emptive System Execution Variables
         force_system_tool = False
         tool_to_call = ""
-        if _needs_external_info(user_text):
+        search_query = user_text
+        if route == "FACTUAL_SEARCH":
             force_system_tool = True
             tool_to_call = _select_tool(user_text)
+            search_query = _clean_factual_search_query(user_text)
 
         # Action Mode: attempt tool use with strict JSON action contract.
         tool_iterations = 0
@@ -271,66 +436,130 @@ class AgentRuntime:
                 return "No web search results found."
             lines: list[str] = ["Web Search Results:"]
             for idx, item in enumerate(results[:3], start=1):
-                line = f"{item.get('title', '')} - {item.get('url', '')}".strip()
+                snippet = item.get("snippet") or item.get("url", "")
+                line = f"{item.get('title', '')} - {snippet}".strip()
                 lines.append(f"{idx}. {line}")
             return "\n".join(lines).strip()
 
-        while tool_iterations <= self.config.max_tool_iterations:
-            system = build_system_prompt(assistant_name=self.config.assistant_name, tools=self.tools.describe())
-            # Keep action mode per-turn and local, to avoid polluting future turns with repair/tool chatter.
-            action_messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-            history = self.db.list_messages(self.conversation_id)
-            action_messages.extend(history[-10:])
-            break
+        history = self.db.list_messages(self.conversation_id, limit=6)
+        action_messages: list[dict[str, Any]] = [{"role": "system", "content": self._action_system_prompt}]
+        action_messages.extend(history)
+        if route == "ACTION" and reason == "weather_request":
+            action_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "This is a weather request. Use weather.current.\n"
+                        "Prefer the location from the user's message.\n"
+                        "If none is provided, the tool may fall back to home_location or IP geolocation."
+                    ),
+                }
+            )
 
-        # Action loop runs on a local message list.
-        forced_tool_attempts = 0
         while tool_iterations <= self.config.max_tool_iterations:
-            if force_system_tool and not did_summarize_web_search and tool_to_call == "web.search":
-                forced_tool_attempts += 1
-                if forced_tool_attempts > 1:
-                    assistant_text = "No luck finding that one, Boss. Try rephrasing or being more specific."
-                    self.db.add_message(self.conversation_id, "assistant", assistant_text)
-                    yield assistant_text
-                    return
-                    
+            if force_system_tool and not did_summarize_web_search and tool_to_call in ("web.search", "web.news"):
                 try:
-                    result = self.tools.call("web.search", {"query": user_text}, conversation_id=self.conversation_id)
+                    result = self.tools.call(tool_to_call, {"query": search_query}, conversation_id=self.conversation_id)
                 except Exception as e:
-                    logger.warning("system_tool_call_failed tool=web.search error=%s", e)
+                    logger.warning("system_tool_call_failed tool=%s error=%s", tool_to_call, e)
                     result = {}
-                
-                if not result.get("results") or len(result.get("results", [])) < 2:
-                    assistant_text = "No luck finding that one, Boss. Try rephrasing or being more specific."
+
+                if not result.get("results"):
+                    assistant_text = "I couldn't fetch live news right now. Try again in a bit."
                     self.db.add_message(self.conversation_id, "assistant", assistant_text)
                     yield assistant_text
+                    logger.info(
+                        "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=factual_search_fallback",
+                        self.conversation_id,
+                        route,
+                        int((time.perf_counter() - turn_started) * 1000),
+                    )
                     return
-                    
+
                 # Stream the summary directly - no JSON, no parsing, no timeout
                 full_response = ""
                 for token in self._stream_summarize(user_text, result):
                     full_response += token
                     yield token
                 self.db.add_message(self.conversation_id, "assistant", full_response)
+                logger.info(
+                    "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=factual_search_summary",
+                    self.conversation_id,
+                    route,
+                    int((time.perf_counter() - turn_started) * 1000),
+                )
                 return
                 
             try:
-                content = self.provider.chat(self.config.smart_model, action_messages, temperature=0.0)
+                content = self._provider_chat(action_messages, temperature=0.0, model=self.config.model)
             except Exception as e:  # noqa: BLE001
-                logger.warning("model_call_failed model=%s error=%s", self.config.smart_model, e)
+                logger.warning("model_call_failed model=%s error=%s", self.config.model, e)
                 if awaiting_files_search_summary and last_files_search_result is not None:
                     assistant_text = fallback_files_search_summary()
                     self.db.add_message(self.conversation_id, "assistant", assistant_text)
                     yield assistant_text
+                    logger.info(
+                        "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=files_search_fallback",
+                        self.conversation_id,
+                        route,
+                        int((time.perf_counter() - turn_started) * 1000),
+                    )
                     return
                 if awaiting_web_search_summary and last_web_search_result is not None:
                     assistant_text = fallback_web_search_summary()
                     self.db.add_message(self.conversation_id, "assistant", assistant_text)
                     yield assistant_text
+                    logger.info(
+                        "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=web_search_fallback",
+                        self.conversation_id,
+                        route,
+                        int((time.perf_counter() - turn_started) * 1000),
+                    )
                     return
-                assistant_text = self._chat_mode_reply(self.config.smart_model, user_text)
+                assistant_text = self._chat_mode_reply(self.config.chat_model, user_text)
                 self.db.add_message(self.conversation_id, "assistant", assistant_text)
                 yield assistant_text
+                logger.info(
+                    "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=chat_fallback",
+                    self.conversation_id,
+                    route,
+                    int((time.perf_counter() - turn_started) * 1000),
+                )
+                return
+
+            if awaiting_files_search_summary and last_files_search_result is not None:
+                assistant_text = fallback_files_search_summary()
+                self.db.add_message(self.conversation_id, "assistant", assistant_text)
+                yield assistant_text
+                logger.info(
+                    "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=files_search_fallback",
+                    self.conversation_id,
+                    route,
+                    int((time.perf_counter() - turn_started) * 1000),
+                )
+                return
+            if awaiting_web_search_summary and last_web_search_result is not None:
+                assistant_text = fallback_web_search_summary()
+                self.db.add_message(self.conversation_id, "assistant", assistant_text)
+                yield assistant_text
+                logger.info(
+                    "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=web_search_fallback",
+                    self.conversation_id,
+                    route,
+                    int((time.perf_counter() - turn_started) * 1000),
+                )
+                return
+
+            if _looks_like_refusal(content):
+                assistant_text = self._chat_mode_reply(self.config.chat_model, user_text)
+                self.db.add_message(self.conversation_id, "assistant", assistant_text)
+                yield assistant_text
+                logger.info(
+                    "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=refusal_chat_fallback",
+                    self.conversation_id,
+                    route,
+                    int((time.perf_counter() - turn_started) * 1000),
+                )
                 return
 
             if _looks_like_plain_text(content):
@@ -340,12 +569,6 @@ class AgentRuntime:
                     logger.debug("Intercepted pure conversational text. Bypassing JSON repair.")
                     self.db.add_message(self.conversation_id, "assistant", content)
                     yield content
-                    return
-                
-                if _looks_like_refusal(content):
-                    assistant_text = self._chat_mode_reply(self.config.smart_model, user_text)
-                    self.db.add_message(self.conversation_id, "assistant", assistant_text)
-                    yield assistant_text
                     return
 
             repair_attempts = 0
@@ -364,29 +587,47 @@ class AgentRuntime:
 
                 repair_attempts = 1
                 try:
-                    repair_a = self.provider.chat(
-                        self.config.smart_model,
+                    repair_a = self._provider_chat(
                         [
                             {"role": "system", "content": "Return one valid JSON object only."},
                             {"role": "user", "content": build_repair_prompt_format(content)},
                         ],
                         temperature=0.0,
+                        model=self.config.model,
                     )
                 except Exception as e:  # noqa: BLE001
-                    logger.warning("model_repair_a_failed model=%s error=%s", self.config.smart_model, e)
+                    logger.warning("model_repair_a_failed model=%s error=%s", self.config.model, e)
                     if awaiting_files_search_summary and last_files_search_result is not None:
                         assistant_text = fallback_files_search_summary()
                         self.db.add_message(self.conversation_id, "assistant", assistant_text)
                         yield assistant_text
+                        logger.info(
+                            "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=files_search_fallback",
+                            self.conversation_id,
+                            route,
+                            int((time.perf_counter() - turn_started) * 1000),
+                        )
                         return
                     if awaiting_web_search_summary and last_web_search_result is not None:
                         assistant_text = fallback_web_search_summary()
                         self.db.add_message(self.conversation_id, "assistant", assistant_text)
                         yield assistant_text
+                        logger.info(
+                            "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=web_search_fallback",
+                            self.conversation_id,
+                            route,
+                            int((time.perf_counter() - turn_started) * 1000),
+                        )
                         return
-                    assistant_text = self._chat_mode_reply(self.config.smart_model, user_text)
+                    assistant_text = self._chat_mode_reply(self.config.chat_model, user_text)
                     self.db.add_message(self.conversation_id, "assistant", assistant_text)
                     yield assistant_text
+                    logger.info(
+                        "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=chat_fallback",
+                        self.conversation_id,
+                        route,
+                        int((time.perf_counter() - turn_started) * 1000),
+                    )
                     return
 
                 try:
@@ -397,80 +638,48 @@ class AgentRuntime:
                 except ParseError as repair_a_error:
                     validation_error_count = max(validation_error_count, repair_a_error.validation_error_count)
 
-                    repair_attempts = 2
-                    try:
-                        repair_b = self.provider.chat(
-                        self.config.smart_model,
-                            [
-                                {"role": "system", "content": "Return one valid JSON object only."},
-                                {
-                                    "role": "user",
-                                    "content": build_repair_prompt_schema(
-                                        repair_a,
-                                        validation_hint=_validation_hint(repair_a_error),
-                                    ),
-                                },
-                            ],
-                            temperature=0.0,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("model_repair_b_failed model=%s error=%s", self.config.smart_model, e)
-                        _log_parse_event(
-                            model=self.config.smart_model,
-                            parse_stage="fallback",
-                            parse_confidence="fallback",
-                            validation_error_count=validation_error_count,
-                            repair_attempts=repair_attempts,
-                        )
-                        if awaiting_files_search_summary and last_files_search_result is not None:
-                            assistant_text = fallback_files_search_summary()
-                            self.db.add_message(self.conversation_id, "assistant", assistant_text)
-                            yield assistant_text
-                            return
-                        if awaiting_web_search_summary and last_web_search_result is not None:
-                            assistant_text = fallback_web_search_summary()
-                            self.db.add_message(self.conversation_id, "assistant", assistant_text)
-                            yield assistant_text
-                            return
-                        assistant_text = self._chat_mode_reply(self.config.smart_model, user_text)
+                    _log_parse_event(
+                        model=self.config.model,
+                        parse_stage="fallback",
+                        parse_confidence="fallback",
+                        validation_error_count=validation_error_count,
+                        repair_attempts=repair_attempts,
+                    )
+                    if awaiting_files_search_summary and last_files_search_result is not None:
+                        assistant_text = fallback_files_search_summary()
                         self.db.add_message(self.conversation_id, "assistant", assistant_text)
                         yield assistant_text
+                        logger.info(
+                            "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=files_search_fallback",
+                            self.conversation_id,
+                            route,
+                            int((time.perf_counter() - turn_started) * 1000),
+                        )
                         return
-
-                    try:
-                        outcome = parse_action_outcome_with_normalization(repair_b)
-                        action = outcome.action
-                        parse_stage = "repair_b"
-                        parse_confidence = "repaired"
-                    except ParseError as repair_b_error:
-                        validation_error_count = max(
-                            validation_error_count,
-                            repair_b_error.validation_error_count,
-                        )
-                        _log_parse_event(
-                            model=self.config.smart_model,
-                            parse_stage="fallback",
-                            parse_confidence="fallback",
-                            validation_error_count=validation_error_count,
-                            repair_attempts=repair_attempts,
-                        )
-                        if awaiting_files_search_summary and last_files_search_result is not None:
-                            assistant_text = fallback_files_search_summary()
-                            self.db.add_message(self.conversation_id, "assistant", assistant_text)
-                            yield assistant_text
-                            return
-                        if awaiting_web_search_summary and last_web_search_result is not None:
-                            assistant_text = fallback_web_search_summary()
-                            self.db.add_message(self.conversation_id, "assistant", assistant_text)
-                            yield assistant_text
-                            return
-                        assistant_text = self._chat_mode_reply(self.config.smart_model, user_text)
+                    if awaiting_web_search_summary and last_web_search_result is not None:
+                        assistant_text = fallback_web_search_summary()
                         self.db.add_message(self.conversation_id, "assistant", assistant_text)
                         yield assistant_text
+                        logger.info(
+                            "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=web_search_fallback",
+                            self.conversation_id,
+                            route,
+                            int((time.perf_counter() - turn_started) * 1000),
+                        )
                         return
+                    assistant_text = self._chat_mode_reply(self.config.chat_model, user_text)
+                    self.db.add_message(self.conversation_id, "assistant", assistant_text)
+                    yield assistant_text
+                    logger.info(
+                        "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=chat_fallback",
+                        self.conversation_id,
+                        route,
+                        int((time.perf_counter() - turn_started) * 1000),
+                    )
+                    return
 
             _log_parse_event(
-                model=self.config.smart_model,
+                model=self.config.model,
                 parse_stage=parse_stage,
                 parse_confidence=parse_confidence,
                 validation_error_count=validation_error_count,
@@ -497,7 +706,7 @@ class AgentRuntime:
                 # If the user didn't ask for tool-like work, treat "clarify what tools to use"
                 # responses as an Action Mode failure and fall back to Chat Mode.
                 if tool_iterations == 0:
-                    assistant_text = self._chat_mode_reply(self.config.smart_model, user_text)
+                    assistant_text = self._chat_mode_reply(self.config.chat_model, user_text)
                     self.db.add_message(self.conversation_id, "assistant", assistant_text)
                     yield assistant_text
                     return
@@ -517,19 +726,37 @@ class AgentRuntime:
                     assistant_text = fallback_files_search_summary()
                     self.db.add_message(self.conversation_id, "assistant", assistant_text)
                     yield assistant_text
+                    logger.info(
+                        "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=files_search_fallback",
+                        self.conversation_id,
+                        route,
+                        int((time.perf_counter() - turn_started) * 1000),
+                    )
                     return
                 if awaiting_web_search_summary and last_web_search_result is not None:
                     assistant_text = fallback_web_search_summary()
                     self.db.add_message(self.conversation_id, "assistant", assistant_text)
                     yield assistant_text
+                    logger.info(
+                        "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=web_search_fallback",
+                        self.conversation_id,
+                        route,
+                        int((time.perf_counter() - turn_started) * 1000),
+                    )
                     return
 
                 tool_iterations += 1
                 tool = self.tools.tools.get(action.name)
                 if tool is None:
-                    assistant_text = self._chat_mode_reply(self.config.smart_model, user_text)
+                    assistant_text = self._chat_mode_reply(self.config.chat_model, user_text)
                     self.db.add_message(self.conversation_id, "assistant", assistant_text)
                     yield assistant_text
+                    logger.info(
+                        "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=chat_fallback",
+                        self.conversation_id,
+                        route,
+                        int((time.perf_counter() - turn_started) * 1000),
+                    )
                     return
                     
                 if action.name in ("web.search", "web.read"):
@@ -599,21 +826,39 @@ class AgentRuntime:
             assistant_text = fallback_files_search_summary()
             self.db.add_message(self.conversation_id, "assistant", assistant_text)
             yield assistant_text
+            logger.info(
+                "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=files_search_fallback",
+                self.conversation_id,
+                route,
+                int((time.perf_counter() - turn_started) * 1000),
+            )
             return
         if awaiting_web_search_summary and last_web_search_result is not None:
             assistant_text = fallback_web_search_summary()
             self.db.add_message(self.conversation_id, "assistant", assistant_text)
             yield assistant_text
+            logger.info(
+                "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=web_search_fallback",
+                self.conversation_id,
+                route,
+                int((time.perf_counter() - turn_started) * 1000),
+            )
             return
 
         _log_parse_event(
-            model=self.config.smart_model,
+            model=self.config.model,
             parse_stage="fallback",
             parse_confidence="fallback",
             validation_error_count=0,
             repair_attempts=0,
         )
-        assistant_text = self._chat_mode_reply(self.config.smart_model, user_text)
+        assistant_text = self._chat_mode_reply(self.config.chat_model, user_text)
         self.db.add_message(self.conversation_id, "assistant", assistant_text)
         yield assistant_text
+        logger.info(
+            "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=chat_fallback",
+            self.conversation_id,
+            route,
+            int((time.perf_counter() - turn_started) * 1000),
+        )
         return

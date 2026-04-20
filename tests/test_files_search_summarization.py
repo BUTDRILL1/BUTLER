@@ -20,7 +20,7 @@ from butler.tools.registry import build_default_tool_registry  # noqa: E402
 class FakeProvider:
     responses: list[str]
 
-    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2) -> str:
+    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> str:
         if not self.responses:
             return '{"type":"final","content":"(no more scripted responses)"}'
         return self.responses.pop(0)

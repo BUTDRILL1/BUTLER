@@ -30,24 +30,24 @@ class CliEnv:
 
 class Spinner:
     def __init__(self):
-        self._running = False
+        self._stop = threading.Event()
         self._thread = None
 
     def start(self):
-        self._running = True
+        self._stop.clear()
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
 
     def _spin(self):
         for c in itertools.cycle(["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]):
-            if not self._running:
+            if self._stop.is_set():
                 break
             print(f"\r  {c} Thinking...", end="", flush=True)
             time.sleep(0.08)
         print("\r" + " " * 20 + "\r", end="", flush=True)
 
     def stop(self):
-        self._running = False
+        self._stop.set()
         if self._thread:
             self._thread.join()
 
@@ -192,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(prog="butler")
     parser.add_argument("--chat", nargs="*", help="One-shot chat prompt")
+    parser.add_argument("--gem", "--gemini", action="store_true", help="Use Gemini API instead of local Ollama")
     ns = parser.parse_args(argv)
 
     log_level = os.getenv("BUTLER_LOG_LEVEL", "").strip().upper()
@@ -199,6 +200,25 @@ def main(argv: list[str] | None = None) -> int:
         logging.basicConfig(level=getattr(logging, log_level, logging.INFO), format="%(levelname)s %(name)s: %(message)s")
 
     config = load_config()
+    
+    if ns.gem:
+        config = config.model_copy(update={
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+            "chat_model": "gemini-2.5-flash"
+        })
+        
+    if config.provider == "gemini" and not config.gemini_api_key:
+        print("Gemini API key is required but not found in configuration.")
+        key = input("Please enter your Gemini API key: ").strip()
+        if not key:
+            print("Error: API key cannot be empty.")
+            return 2
+        config = config.model_copy(update={"gemini_api_key": key})
+        # Save to config to persist
+        from butler.config import save_config
+        save_config(config)
+
     db = ButlerDB.open(config)
     tools = build_default_tool_registry(config, db)
     try:
@@ -224,8 +244,9 @@ def main(argv: list[str] | None = None) -> int:
         prompt = " ".join(ns.chat).strip()
         if not prompt:
             return 2
-        response = runtime.chat_once(prompt)
-        print(response)
+        for token in runtime.chat_once_stream(prompt):
+            print(token, end="", flush=True)
+        print()
         return 0
 
     env = CliEnv(stdin_is_tty=sys.stdin.isatty(), stdout_is_tty=sys.stdout.isatty())
@@ -257,12 +278,12 @@ def main(argv: list[str] | None = None) -> int:
             
         spinner = Spinner()
         spinner.start()
-        print("BUTLER> ", end="", flush=True)
         try:
             first = True
             for token in runtime.chat_once_stream(line):
                 if first:
                     spinner.stop()
+                    print("BUTLER> ", end="", flush=True)
                     first = False
                 print(token, end="", flush=True)
             print()

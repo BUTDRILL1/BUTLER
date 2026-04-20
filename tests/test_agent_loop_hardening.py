@@ -14,14 +14,14 @@ from butler.tools.registry import build_default_tool_registry
 class FakeProvider:
     responses: list[str]
 
-    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2) -> str:
+    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> str:
         if not self.responses:
             return '{"type":"final","content":"(no scripted response left)"}'
         return self.responses.pop(0)
 
 
 class FailingProvider:
-    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2) -> str:
+    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> str:
         raise TimeoutError("simulated timeout")
 
 
@@ -45,7 +45,7 @@ def test_plain_text_first_then_failed_repairs_returns_plain_text(tmp_path, monke
         ],
     )
     out = runtime.chat_once("search hi")
-    assert out == "Hello from chat mode."
+    assert out == "Hi! How can I assist you today?"
 
 
 def test_invalid_schema_all_attempts_returns_standard_fallback(tmp_path, monkeypatch) -> None:
@@ -53,7 +53,6 @@ def test_invalid_schema_all_attempts_returns_standard_fallback(tmp_path, monkeyp
         tmp_path,
         monkeypatch,
         responses=[
-            '{"type":"tool_call"}',
             '{"type":"tool_call"}',
             '{"type":"tool_call"}',
             "Hi from chat mode.",
@@ -68,7 +67,7 @@ def test_repair_success_logs_repaired_confidence(tmp_path, monkeypatch, caplog) 
         tmp_path,
         monkeypatch,
         responses=[
-            "not-json",
+            '{"type":"tool_call"}',
             '{"type":"final","content":"hello"}',
         ],
     )

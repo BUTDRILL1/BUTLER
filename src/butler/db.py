@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -11,7 +12,7 @@ from butler.config import ButlerConfig
 from butler.paths import db_path, ensure_dir, notes_dir
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -19,6 +20,11 @@ def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA cache_size = -32000;")
+    conn.execute("PRAGMA mmap_size = 268435456;")
+    conn.execute("PRAGMA temp_store = MEMORY;")
     return conn
 
 
@@ -74,7 +80,19 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             """
         )
         conn.execute("PRAGMA user_version = 1;")
-        conn.commit()
+
+    if current < 2:
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_conversation_created_at
+              ON messages(conversation_id, created_at_ms);
+            CREATE INDEX IF NOT EXISTS idx_conversations_created_at_desc
+              ON conversations(created_at_ms DESC);
+            """
+        )
+        conn.execute("PRAGMA user_version = 2;")
+
+    conn.commit()
 
 
 def _now_ms() -> int:
@@ -82,8 +100,6 @@ def _now_ms() -> int:
 
 
 def _uuid() -> str:
-    import uuid
-
     return str(uuid.uuid4())
 
 
@@ -106,7 +122,6 @@ class ButlerDB:
             "INSERT INTO conversations (id, created_at_ms) VALUES (?, ?)",
             (cid, _now_ms()),
         )
-        self.conn.commit()
         return cid
 
     def get_last_conversation(self, max_age_hours: int = 24) -> str | None:
@@ -122,13 +137,19 @@ class ButlerDB:
             "INSERT INTO messages (id, conversation_id, role, content, created_at_ms) VALUES (?, ?, ?, ?, ?)",
             (_uuid(), conversation_id, role, content, _now_ms()),
         )
-        self.conn.commit()
 
-    def list_messages(self, conversation_id: str) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY created_at_ms ASC",
-            (conversation_id,),
-        ).fetchall()
+    def list_messages(self, conversation_id: str, limit: int | None = None) -> list[dict[str, Any]]:
+        if limit is None:
+            rows = self.conn.execute(
+                "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY created_at_ms ASC",
+                (conversation_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY created_at_ms DESC LIMIT ?",
+                (conversation_id, limit),
+            ).fetchall()
+            rows = list(reversed(rows))
         return [{"role": r["role"], "content": r["content"]} for r in rows]
 
     def log_tool_call(
@@ -161,4 +182,6 @@ class ButlerDB:
                 duration_ms,
             ),
         )
+
+    def flush_turn(self) -> None:
         self.conn.commit()

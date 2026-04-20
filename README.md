@@ -8,14 +8,15 @@ Key properties:
 - Safe-by-default: file access is allowlisted; write actions require confirmation
 - Persistent: stores chat + tool audit logs + note metadata in SQLite
 - Robust: handles imperfect model output with repair + fallbacks
+- Single-model runtime: chat, action, routing, repair, and summarization all use one Ollama model
 
 ## Quickstart (Windows PowerShell)
 
 ### 1) Prereqs
 - Python 3.10+
 - Ollama installed and running
-- Pull the model you want (default is `gemma:2b`):
-  - `ollama pull gemma:2b`
+- Pull the default model (`mistral:7b-instruct`):
+  - `ollama pull mistral:7b-instruct`
   - Verify: `ollama list`
 
 ### 2) Create a venv and install
@@ -51,6 +52,10 @@ BUTLER has two LLM modes:
 - Action Mode can call tools, then see tool results, then produce a final answer.
 
 If Action Mode fails (bad JSON, wrong schema, refusal text), BUTLER falls back to Chat Mode so you still get a human-style reply.
+
+One important detail:
+- BUTLER uses the same Ollama model for both modes.
+- You only choose the model once, through `BUTLER_MODEL` or the saved config file.
 
 ## Commands (Inside the Interactive CLI)
 
@@ -110,7 +115,7 @@ Inside BUTLER home:
 General:
 - `BUTLER_HOME`: override data directory
 - `BUTLER_OLLAMA_URL`: default `http://127.0.0.1:11434`
-- `BUTLER_MODEL`: default `gemma:2b`
+- `BUTLER_MODEL`: default `mistral:7b-instruct`
 - `BUTLER_LOG_LEVEL`: set to `DEBUG` for deep troubleshooting
 
 Model reliability (timeouts/retries):
@@ -164,6 +169,6 @@ Repo layout:
 ## What To Build Next
 
 Good next upgrades:
-1) Separate models: one for Chat Mode, one for Action Mode (better tool compliance without sacrificing chat quality)
-2) Incremental indexing (avoid full rebuild on every `/index sync`)
-3) Add a Web UI (keep the same core runtime and tool layer)
+1) Incremental indexing (avoid full rebuild on every `/index sync`)
+2) Add a Web UI (keep the same core runtime and tool layer)
+3) Improve tool-selection heuristics for more reliable action routing

@@ -14,6 +14,7 @@ from butler.tools.base import Tool, ToolContext, ToolError
 # Cache and rate limit state
 _web_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}
 _domain_last_call: dict[str, float] = {}
+_query_last_call: dict[str, float] = {}
 CACHE_TTL_SECONDS = 600
 
 class WebSearchArgs(BaseModel):
@@ -25,13 +26,17 @@ def _web_search(ctx: ToolContext, args: WebSearchArgs) -> dict[str, Any]:
         raise ToolError("Empty query")
         
     cache_key = query.lower()
-    now = time.time()
     if cache_key in _web_cache:
         cached_results, timestamp = _web_cache[cache_key]
-        if now - timestamp < CACHE_TTL_SECONDS:
+        if time.time() - timestamp < CACHE_TTL_SECONDS:
             return {"query": query, "results": cached_results, "cached": True}
 
-    time.sleep(0.3)
+    now = time.time()
+    last_query_call = _query_last_call.get(cache_key, 0)
+    if now - last_query_call < 2.0:
+        time.sleep(1.0)
+    _query_last_call[cache_key] = time.time()
+
     try:
         ddgs = DDGS()
         raw_results = list(ddgs.text(query, max_results=15))
@@ -154,6 +159,14 @@ def _web_read(ctx: ToolContext, args: WebReadArgs) -> dict[str, Any]:
     content = content[:3000].strip()
     return {"url": url, "title": title.strip(), "content": content}
 
+class WebNewsArgs(BaseModel):
+    query: str = Field(max_length=200)
+
+def _web_news(ctx: ToolContext, args: WebNewsArgs) -> dict[str, Any]:
+    with DDGS() as ddgs:
+        results = list(ddgs.news(args.query, max_results=5))
+    return {"results": results[:3]}
+
 def build() -> list[Tool]:
     return [
         Tool(
@@ -168,6 +181,13 @@ def build() -> list[Tool]:
             description="Read text content from a specific URL safely.",
             input_model=WebReadArgs,
             handler=_web_read,
+            side_effect=False,
+        ),
+        Tool(
+            name="web.news",
+            description="Search the web specifically for latest news and headlines.",
+            input_model=WebNewsArgs,
+            handler=_web_news,
             side_effect=False,
         ),
     ]

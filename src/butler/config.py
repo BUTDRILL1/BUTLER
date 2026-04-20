@@ -12,8 +12,11 @@ from butler.paths import config_path, ensure_dir
 class ButlerConfig(BaseModel):
     assistant_name: str = "BUTLER"
     ollama_url: str = Field(default_factory=lambda: os.getenv("BUTLER_OLLAMA_URL", "http://127.0.0.1:11434"))
-    fast_model: str = Field(default_factory=lambda: os.getenv("BUTLER_FAST_MODEL", "gemma:2b"))
-    smart_model: str = Field(default_factory=lambda: os.getenv("BUTLER_SMART_MODEL", "qwen2.5:7b"))
+    provider: str = Field(default_factory=lambda: os.getenv("BUTLER_PROVIDER", "ollama"))
+    gemini_api_key: str = Field(default_factory=lambda: os.getenv("BUTLER_GEMINI_API_KEY", ""))
+    model: str = Field(default_factory=lambda: os.getenv("BUTLER_MODEL", "mistral:7b-instruct"))
+    chat_model: str = Field(default_factory=lambda: os.getenv("BUTLER_CHAT_MODEL", "gemma:2b"))
+    home_location: str = ""
 
     model_timeout_seconds: int = Field(default_factory=lambda: int(os.getenv("BUTLER_MODEL_TIMEOUT_SECONDS", "180")))
     model_retry_count: int = Field(default_factory=lambda: int(os.getenv("BUTLER_MODEL_RETRY_COUNT", "1")))
@@ -30,7 +33,7 @@ class ButlerConfig(BaseModel):
 
     max_file_bytes: int = 512_000
     tool_timeout_seconds: int = 10
-    max_tool_iterations: int = 6
+    max_tool_iterations: int = 3
 
 
 def load_config() -> ButlerConfig:
