@@ -193,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="butler")
     parser.add_argument("--chat", nargs="*", help="One-shot chat prompt")
     parser.add_argument("--gem", "--gemini", action="store_true", help="Use Gemini API instead of local Ollama")
+    parser.add_argument("--gui", action="store_true", help="Launch the graphical floating widget")
+    parser.add_argument("--claude", action="store_true", help="Use Anthropic Claude API instead of local Ollama")
     ns = parser.parse_args(argv)
 
     log_level = os.getenv("BUTLER_LOG_LEVEL", "").strip().upper()
@@ -208,6 +210,15 @@ def main(argv: list[str] | None = None) -> int:
             "chat_model": "gemini-2.5-flash"
         })
         
+    if ns.claude:
+        config = config.model_copy(update={
+            "provider": "claude",
+            "model": "claude-3-5-sonnet-20241022",
+            "chat_model": "claude-3-5-sonnet-20241022"
+        })
+
+    from butler.config import save_config
+        
     if config.provider == "gemini" and not config.gemini_api_key:
         print("Gemini API key is required but not found in configuration.")
         key = input("Please enter your Gemini API key: ").strip()
@@ -216,7 +227,16 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         config = config.model_copy(update={"gemini_api_key": key})
         # Save to config to persist
-        from butler.config import save_config
+        save_config(config)
+
+    if config.provider == "claude" and not config.claude_api_key:
+        print("Anthropic Claude API key is required but not found in configuration.")
+        key = input("Please enter your Anthropic API key: ").strip()
+        if not key:
+            print("Error: API key cannot be empty.")
+            return 2
+        config = config.model_copy(update={"claude_api_key": key})
+        # Save to config to persist
         save_config(config)
 
     db = ButlerDB.open(config)
@@ -239,6 +259,41 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         raise
+
+    if ns.gui:
+        import threading
+        from butler.gui import ButlerWidget
+        from butler.voice.engine import VoiceEngine
+
+        def on_stt_command(text: str):
+            print(f"Heard: {text}")
+            state.widget.after(0, lambda: state.widget.set_status("Thinking..."))
+            try:
+                response_tokens = list(runtime.chat_once_stream(text))
+                final_text = "".join(response_tokens).strip()
+                print(f"Response: {final_text}")
+                if final_text:
+                    engine.play_tts(final_text)
+                else:
+                    state.widget.after(0, lambda: state.widget.set_status("Ready"))
+            except Exception as e:
+                print(f"STT Error: {e}")
+                state.widget.after(0, lambda: state.widget.set_status("Error"))
+                
+        # To avoid circular reference, initialize widget without callbacks first, or use a setup pattern
+        class AppState:
+            pass
+        state = AppState()
+        
+        def safe_status(s):
+            if hasattr(state, "widget"):
+                state.widget.after(0, lambda: state.widget.set_status(s))
+                
+        engine = VoiceEngine(on_command_callback=on_stt_command, status_callback=safe_status)
+        state.widget = ButlerWidget(on_mic_click=engine.trigger_manual_listen, 
+                                    on_wake_toggle=engine.toggle_wake_word)
+        state.widget.mainloop()
+        return 0
 
     if ns.chat is not None:
         prompt = " ".join(ns.chat).strip()

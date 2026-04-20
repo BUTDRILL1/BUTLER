@@ -1,11 +1,11 @@
-# BUTLER (v2)
+# BUTLER (v2.1)
 
 BUTLER is an advanced AI assistant that operates on your local machine. It combines the privacy and control of local-first tools with the immense reasoning speed of cutting-edge APIs, all wrapped up in a sleek, voice-activated desktop widget.
 
 ## Key Features
-- **Sleek Desktop GUI**: A floating, JARVIS-style draggable widget out-of-the-box (`--gui`).
+- **Sleek Desktop GUI**: A floating, draggable widget out-of-the-box (`--gui`).
 - **Voice Capabilities**: Built-in Speech-to-Text (`faster-whisper`), continuous Wake-Word detection, and premium Text-to-Speech (`edge-tts`). 
-- **Dual-Provider Architecture**: Run completely offline using **Ollama**, or switch to ultra-fast cloud inference using the **Gemini API** (`--gem`). 
+- **Tri-Provider Architecture**: Run completely offline using **Ollama**, or switch to ultra-fast cloud inference using the **Gemini API** (`--gem`) or **Anthropic Claude API** (`--claude`). 
 - **Safe-by-default**: File access is tightly allowlisted; write actions require explicit confirmation.
 - **Persistent Memory**: Stores chat, tool audit logs, and note metadata in thread-safe SQLite.
 - **Web-Connected**: Can instantly pull live facts, weather, and breaking news utilizing DuckDuckGo (`web.news` & `web.search`).
@@ -34,13 +34,13 @@ python -m venv butenv
 
 **Launch the Voice Desktop Widget (Recommended)**
 ```powershell
-.\butenv\Scripts\butler.exe --gem --gui
+.\butenv\Scripts\butler.exe --claude --gui
 ```
-*If you haven't set up Gemini yet, the CLI will prompt you for your key on the first run.*
+*If you haven't set up Claude or Gemini yet, the CLI will prompt you for your key on the first run.*
 
 **Launch the Interactive Terminal REPL**
 ```powershell
-.\butenv\Scripts\butler.exe --gem
+.\butenv\Scripts\butler.exe --claude
 ```
 
 **One-shot CLI Execution**

@@ -212,3 +212,122 @@ class GeminiProvider:
         finally:
             if resp is not None:
                 resp.close()
+
+
+@dataclass
+class AnthropicProvider:
+    api_key: str
+    model: str = "claude-3-5-sonnet-20241022"
+    timeout_seconds: int = 60
+    retry_count: int = 0
+    total_timeout_seconds: int = 0
+    retry_backoff_seconds: float = 0.3
+    _session: requests.Session = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._session = requests.Session()
+        self._session.headers.update({
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        })
+
+    def _format_messages(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+        contents = []
+        system_instruction = ""
+
+        for msg in messages:
+            role = "user" if msg["role"] == "user" else "assistant"
+            content = msg["content"]
+            if msg["role"] == "system":
+                system_instruction = content
+            else:
+                contents.append({"role": role, "content": content})
+
+        return contents, system_instruction
+
+    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> str:
+        active_model = model or self.model
+        url = "https://api.anthropic.com/v1/messages"
+        
+        contents, system_instruction = self._format_messages(messages)
+        
+        payload = {
+            "model": active_model,
+            "max_tokens": 4096,
+            "messages": contents,
+            "temperature": temperature
+        }
+        if system_instruction:
+            payload["system"] = system_instruction
+            
+        max_attempts = 1 + max(0, int(self.retry_count))
+        start = time.time()
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            if self.total_timeout_seconds and (time.time() - start) > float(self.total_timeout_seconds):
+                break
+            try:
+                resp = self._session.post(url, json=payload, timeout=self.timeout_seconds)
+                try:
+                    if resp.status_code >= 400:
+                        raise ModelProviderError(f"Anthropic error {resp.status_code}: {resp.text}")
+                    data = resp.json()
+                finally:
+                    resp.close()
+                return data["content"][0]["text"].strip()
+            except requests.RequestException as e:
+                last_error = e
+            except ModelProviderError as e:
+                raise
+            except (KeyError, IndexError) as e:
+                raise ModelProviderError(f"Unexpected Anthropic response structure: {e}")
+
+            if attempt < max_attempts:
+                time.sleep(self.retry_backoff_seconds)
+
+        elapsed = time.time() - start
+        budget = self.total_timeout_seconds
+        attempts_used = min(max_attempts, attempt)
+        base = f"Model call failed after {attempts_used} attempt(s) in {elapsed:.1f}s"
+        if budget:
+            base += f" (budget {budget}s)"
+        if last_error:
+            raise ModelProviderError(f"{base}: {last_error}") from last_error
+        raise ModelProviderError(base)
+
+    def chat_stream(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> Any:
+        active_model = model or self.model
+        url = "https://api.anthropic.com/v1/messages"
+        
+        contents, system_instruction = self._format_messages(messages)
+        
+        payload = {
+            "model": active_model,
+            "max_tokens": 4096,
+            "messages": contents,
+            "temperature": temperature,
+            "stream": True
+        }
+        if system_instruction:
+            payload["system"] = system_instruction
+
+        resp = None
+        try:
+            resp = self._session.post(url, json=payload, stream=True, timeout=(10, self.timeout_seconds))
+            if resp.status_code >= 400:
+                raise ModelProviderError(f"Anthropic error {resp.status_code}: {resp.text}")
+            for line in resp.iter_lines():
+                if line.startswith(b"data: "):
+                    line_data = line[6:]
+                    chunk = json.loads(line_data)
+                    if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "text_delta":
+                        token = chunk["delta"].get("text", "")
+                        if token:
+                            yield token
+        except (requests.RequestException, json.JSONDecodeError) as e:
+            raise ModelProviderError(f"Model stream failed: {e}") from e
+        finally:
+            if resp is not None:
+                resp.close()

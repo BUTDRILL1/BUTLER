@@ -13,7 +13,7 @@ from butler.agent.prompting import (
     build_repair_prompt_format,
     build_system_prompt,
 )
-from butler.agent.provider import GeminiProvider, OllamaProvider
+from butler.agent.provider import AnthropicProvider, GeminiProvider, OllamaProvider
 from butler.agent.schema import ClarifyAction, FinalAction, ToolCallAction
 from butler.config import ButlerConfig
 from butler.db import ButlerDB
@@ -243,6 +243,14 @@ class AgentRuntime:
             if self.config.provider == "gemini":
                 self.provider = GeminiProvider(
                     api_key=self.config.gemini_api_key,
+                    model=self.config.model,
+                    timeout_seconds=self.config.model_timeout_seconds,
+                    retry_count=self.config.model_retry_count,
+                    total_timeout_seconds=self.config.model_total_timeout_seconds,
+                )
+            elif self.config.provider == "claude":
+                self.provider = AnthropicProvider(
+                    api_key=self.config.claude_api_key,
                     model=self.config.model,
                     timeout_seconds=self.config.model_timeout_seconds,
                     retry_count=self.config.model_retry_count,

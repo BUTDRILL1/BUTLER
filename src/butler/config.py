@@ -14,6 +14,7 @@ class ButlerConfig(BaseModel):
     ollama_url: str = Field(default_factory=lambda: os.getenv("BUTLER_OLLAMA_URL", "http://127.0.0.1:11434"))
     provider: str = Field(default_factory=lambda: os.getenv("BUTLER_PROVIDER", "ollama"))
     gemini_api_key: str = Field(default_factory=lambda: os.getenv("BUTLER_GEMINI_API_KEY", ""))
+    claude_api_key: str = Field(default_factory=lambda: os.getenv("BUTLER_CLAUDE_API_KEY", ""))
     model: str = Field(default_factory=lambda: os.getenv("BUTLER_MODEL", "mistral:7b-instruct"))
     chat_model: str = Field(default_factory=lambda: os.getenv("BUTLER_CHAT_MODEL", "gemma:2b"))
     home_location: str = ""
