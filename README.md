@@ -1,174 +1,128 @@
-# BUTLER (v1)
+# BUTLER (v2)
 
-BUTLER is a local-first AI assistant that runs on your machine, uses Ollama for the LLM, and can safely use tools
-(files, notes, indexing) with guardrails.
+BUTLER is an advanced AI assistant that operates on your local machine. It combines the privacy and control of local-first tools with the immense reasoning speed of cutting-edge APIs, all wrapped up in a sleek, voice-activated desktop widget.
 
-Key properties:
-- Local-first: talks to Ollama at `http://127.0.0.1:11434`
-- Safe-by-default: file access is allowlisted; write actions require confirmation
-- Persistent: stores chat + tool audit logs + note metadata in SQLite
-- Robust: handles imperfect model output with repair + fallbacks
-- Single-model runtime: chat, action, routing, repair, and summarization all use one Ollama model
+## Key Features
+- **Sleek Desktop GUI**: A floating, JARVIS-style draggable widget out-of-the-box (`--gui`).
+- **Voice Capabilities**: Built-in Speech-to-Text (`faster-whisper`), continuous Wake-Word detection, and premium Text-to-Speech (`edge-tts`). 
+- **Dual-Provider Architecture**: Run completely offline using **Ollama**, or switch to ultra-fast cloud inference using the **Gemini API** (`--gem`). 
+- **Safe-by-default**: File access is tightly allowlisted; write actions require explicit confirmation.
+- **Persistent Memory**: Stores chat, tool audit logs, and note metadata in thread-safe SQLite.
+- **Web-Connected**: Can instantly pull live facts, weather, and breaking news utilizing DuckDuckGo (`web.news` & `web.search`).
 
 ## Quickstart (Windows PowerShell)
 
-### 1) Prereqs
+### 1) Prerequisites
 - Python 3.10+
-- Ollama installed and running
-- Pull the default model (`mistral:7b-instruct`):
+- *(Optional)* Ollama running locally (for offline use).
   - `ollama pull mistral:7b-instruct`
-  - Verify: `ollama list`
 
-### 2) Create a venv and install
+### 2) Installation
 
 ```powershell
+# Clone the repository and navigate into it
 cd C:\Users\HP\OneDrive\Desktop\BUTLER
+
+# Create your virtual environment and install the package
 python -m venv butenv
 .\butenv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
+*Note: For the Voice Widget to work, `pyaudio`, `faster-whisper`, `edge-tts`, `customtkinter`, and `pygame` will be installed.*
+
 ### 3) Run
 
+**Launch the Voice Desktop Widget (Recommended)**
 ```powershell
-.\butenv\Scripts\butler.exe
+.\butenv\Scripts\butler.exe --gem --gui
+```
+*If you haven't set up Gemini yet, the CLI will prompt you for your key on the first run.*
+
+**Launch the Interactive Terminal REPL**
+```powershell
+.\butenv\Scripts\butler.exe --gem
 ```
 
-One-shot:
+**One-shot CLI Execution**
 ```powershell
-.\butenv\Scripts\butler.exe --chat "Say hi"
+.\butenv\Scripts\butler.exe --chat "Summarize the latest news on AI"
 ```
 
-## How BUTLER Works (Beginner-Friendly)
+## How BUTLER Works (Under The Hood)
 
-BUTLER has two LLM modes:
+BUTLER operates on a sophisticated loop that analyzes your input to determine if you are making conversation or asking it to perform an actionable task.
 
-1. Chat Mode (fast)
-- Normal conversation output (plain text).
-- Used for small talk like "Say hi".
+1. **Chat Mode**
+- Bypasses the tool loop for extremely fast, conversational output.
+- Excellent for casual prompts or asking generic knowledge questions.
 
-2. Action Mode (tool-using)
-- The model must output a strict JSON "action" object.
-- Used when your message looks tool-related (files/notes/search/index).
-- Action Mode can call tools, then see tool results, then produce a final answer.
+2. **Action Mode (Tool Using)**
+- Safely enforces a strict JSON "action" object parsing sequence.
+- Action Mode loops until the task completes (e.g., File search -> Read file -> Summarize file).
+- If the model's structure violently fails (bad JSON), BUTLER intercepts and uses self-healing logic to attempt to format the response natively.
 
-If Action Mode fails (bad JSON, wrong schema, refusal text), BUTLER falls back to Chat Mode so you still get a human-style reply.
-
-One important detail:
-- BUTLER uses the same Ollama model for both modes.
-- You only choose the model once, through `BUTLER_MODEL` or the saved config file.
-
-## Commands (Inside the Interactive CLI)
+## Commands (Inside the CLI Terminal)
 
 Help:
 - `/help`
 
-Allowlist folders (required before file tools work):
+Allowlist folders (Required to grant the AI file access):
 - `/roots add C:\path\to\folder`
 - `/roots list`
 
-Indexing (builds searchable index for `.md`/`.txt` under allowlisted roots):
+Indexing (Builds a lightning-fast vector-style searchable index for `.md`/`.txt`):
 - `/index sync`
 
-Notes:
+Notes Management:
 - `/notes create "title" "content"`
 - `/notes append "title" "more content"`
 - `/notes read "title"`
 - `/notes search "query"`
 
-Config view:
-- `/config`
-
-Exit:
+System:
+- `/config` (Prints the current system setup)
 - `/exit`
 
-## Tools (What the Model Can Call)
+## Built-In Tools
 
-These are internal capabilities exposed to Action Mode:
-- `system.now` (read-only)
-- `files.list` (read-only, within allowlisted roots)
-- `files.read_text` (read-only, within allowlisted roots, size capped)
-- `files.search` (read-only, searches the index created by `/index sync`, returns <= 10 short snippets)
-- `notes.create` / `notes.append` (writes, asks for confirmation)
-- `notes.read` / `notes.search` (read-only)
-- `index.sync` (side effect: rebuilds index)
+BUTLER's internal arsenal of capabilities exposed to Action Mode:
+- `system.now` (Time and location)
+- `web.search` / `web.news` / `weather.current` (Live external data)
+- `files.list` (Read-only, strictly within allowlisted roots)
+- `files.read_text` (Read-only text scraping)
+- `files.search` (Searches the user-synced index created by `/index sync`)
+- `notes.create` / `notes.append` (Writes, requires user confirmation)
+- `notes.read` / `notes.search` (Read-only)
 
-## Data and Storage
+## Configuration and Environment
 
-BUTLER stores state under a "BUTLER home" directory.
-
-Default resolution (first writable wins):
-1) `%LOCALAPPDATA%\BUTLER\`
-2) `%APPDATA%\BUTLER\`
-3) `%USERPROFILE%\.butler\`
-4) `.butler\` (inside the repo)
-
-You can override explicitly:
-- `BUTLER_HOME`: a writable folder (recommended if you hit permissions issues)
-
-Inside BUTLER home:
+BUTLER stores state files inside a "BUTLER home" directory (Defaulting to `%LOCALAPPDATA%\BUTLER\` or `.butler\`).
+Inside BUTLER home you will find:
 - `config.json`
 - `butler.sqlite3`
-- `notes\` (markdown files)
+- `notes\` directory
 
-## Configuration and Env Vars
+**Configuration Flags:**
+- Enable Gemini Provider: `butler --gem` or `butler --gemini`
+- Launch GUI: `butler --gui`
+- Override Provider via Env: `BUTLER_PROVIDER=gemini` or `BUTLER_PROVIDER=ollama`
+- Gemini API Key: `BUTLER_GEMINI_API_KEY`
+- Default Local Model: `BUTLER_MODEL=mistral:7b-instruct`
 
-General:
-- `BUTLER_HOME`: override data directory
-- `BUTLER_OLLAMA_URL`: default `http://127.0.0.1:11434`
-- `BUTLER_MODEL`: default `mistral:7b-instruct`
-- `BUTLER_LOG_LEVEL`: set to `DEBUG` for deep troubleshooting
+## Debugging
 
-Model reliability (timeouts/retries):
-- `BUTLER_MODEL_TIMEOUT_SECONDS`: default `180`
-- `BUTLER_MODEL_RETRY_COUNT`: default `1`
-- `BUTLER_MODEL_TOTAL_TIMEOUT_SECONDS`: default `220` (caps total time across retries)
-
-## Debugging (Beginner to Expert)
-
-### Turn on debug logs
-
+If you want to look at the raw un-sanitized matrices and parse loops:
 ```powershell
 $env:BUTLER_LOG_LEVEL="DEBUG"
 .\butenv\Scripts\butler.exe --chat "Say hi"
 ```
 
-What you will see in DEBUG:
-- The raw model output and "cleaned" output (after fence stripping/unescaping).
-- Parse events like:
-  - `parse_stage=direct_json|json_string|escaped_json|repair_a|repair_b|fallback`
-  - `parse_confidence=direct|repaired|fallback`
+Common Issues:
+- **"No allowed roots configured"**: Run `/roots add C:\Users\YourName\Documents` to give BUTLER a folder to index.
+- **Microphone not working**: Ensure `PyAudio` installed cleanly, and that your OS isn't blocking microphone permissions for Python.
+- **Database Threading Crash**: BUTLER requires `WAL` mode and `check_same_thread=False` across its background Audio threads.
 
-### Common issues
-
-1) Ollama is running, but BUTLER times out
-- Some prompts take longer in Action Mode because it may do repairs and tool loops.
-- Increase timeouts via env vars above.
-
-2) PowerShell `curl` confusion
-- In PowerShell, `curl` is an alias to `Invoke-WebRequest`.
-- Use `curl.exe` if you want real curl behavior.
-
-3) "No allowed roots configured"
-- Add at least one root:
-  - `/roots add C:\Users\HP\Documents`
-
-## Development
-
-Run tests:
-```powershell
-.\butenv\Scripts\pytest.exe -q
-```
-
-Repo layout:
-- `src\butler\cli.py`: CLI UX and confirmations
-- `src\butler\agent\loop.py`: routing + tool loop + fallbacks
-- `src\butler\agent\parsing.py`: robust parsing and schema validation
-- `src\butler\tools\`: tool registry and implementations
-- `src\butler\db.py`: SQLite schema and persistence
-
-## What To Build Next
-
-Good next upgrades:
-1) Incremental indexing (avoid full rebuild on every `/index sync`)
-2) Add a Web UI (keep the same core runtime and tool layer)
-3) Improve tool-selection heuristics for more reliable action routing
+## What's Next?
+1) Training custom `.onnx` models for dynamic wake-words in `openwakeword`.
+2) Deep Research background agents.
+3) Executable API tools for OS-level control (Volume, Display brightness, app launching).
