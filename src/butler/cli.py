@@ -108,6 +108,7 @@ def _changeable_config_items(config: ButlerConfig) -> list[MenuItem[str]]:
     return [
         MenuItem("Gemini API Keys", "gemini_api_keys", f"{len(config.gemini_api_keys)} keys loaded"),
         MenuItem("Claude API Keys", "claude_api_keys", f"{len(config.claude_api_keys)} keys loaded"),
+        MenuItem("Nvidia API Keys", "nvidia_api_keys", f"{len(config.nvidia_api_keys)} keys loaded"),
         MenuItem("Spotify Client ID", "spotify_client_id", f"Current: {mask_secret(config.spotify_client_id)}"),
         MenuItem("Spotify Client Secret", "spotify_client_secret", f"Current: {mask_secret(config.spotify_client_secret)}"),
         MenuItem("STT Model", "stt_model", f"Current: {config.stt_model}"),
@@ -160,8 +161,8 @@ def _change_config_value(config: ButlerConfig) -> ButlerConfig:
         if key == "voice":
             config = _select_voice(config)
             continue
-        if key in ("gemini_api_keys", "claude_api_keys"):
-            label = "Gemini" if "gemini" in key else "Claude"
+        if key in ("gemini_api_keys", "claude_api_keys", "nvidia_api_keys"):
+            label = "Gemini" if "gemini" in key else ("Claude" if "claude" in key else "Nvidia")
             config = _manage_api_keys(config, label, key)
             continue
 
@@ -327,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gem", "--gemini", action="store_true", help="Use Gemini API instead of local Ollama")
     parser.add_argument("--gui", action="store_true", help="Launch the graphical floating widget")
     parser.add_argument("--claude", action="store_true", help="Use Anthropic Claude API instead of local Ollama")
+    parser.add_argument("--nvidia", "--nim", action="store_true", help="Use Nvidia NIM API instead of local Ollama")
     parser.add_argument("--change", action="store_true", help="Change configured keys and settings")
     parser.add_argument("--voice", action="store_true", help="Pick and save a default TTS voice")
     parser.add_argument("--auth-spotify", action="store_true", help="Authenticate Spotify safely before launching the voice loop")
@@ -389,7 +391,14 @@ def main(argv: list[str] | None = None) -> int:
             "chat_model": "claude-3-5-sonnet-20241022"
         })
 
-    from butler.config import save_config
+    if ns.nvidia:
+        config = config.model_copy(update={
+            "provider": "nvidia",
+            "model": "mistralai/mistral-nemotron",
+            "chat_model": "mistralai/mistral-nemotron"
+        })
+
+    from butler.config import save_config, ApiKeyConfig
         
     if config.provider == "gemini" and not config.gemini_api_keys:
         print("Gemini API key is required but not found in configuration.")
@@ -397,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
         if not key:
             print("Error: API key cannot be empty.")
             return 2
-        config = config.model_copy(update={"gemini_api_keys": [{"key": key, "label": "default"}]})
+        config = config.model_copy(update={"gemini_api_keys": [ApiKeyConfig(key=key, label="default")]})
         # Save to config to persist
         save_config(config)
 
@@ -407,7 +416,17 @@ def main(argv: list[str] | None = None) -> int:
         if not key:
             print("Error: API key cannot be empty.")
             return 2
-        config = config.model_copy(update={"claude_api_keys": [{"key": key, "label": "default"}]})
+        config = config.model_copy(update={"claude_api_keys": [ApiKeyConfig(key=key, label="default")]})
+        # Save to config to persist
+        save_config(config)
+
+    if config.provider == "nvidia" and not config.nvidia_api_keys:
+        print("Nvidia NIM API key is required but not found in configuration.")
+        key = input("Please enter your Nvidia API key (starts with nvapi-): ").strip()
+        if not key:
+            print("Error: API key cannot be empty.")
+            return 2
+        config = config.model_copy(update={"nvidia_api_keys": [ApiKeyConfig(key=key, label="default")]})
         # Save to config to persist
         save_config(config)
 

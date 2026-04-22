@@ -13,7 +13,7 @@ from butler.agent.prompting import (
     build_repair_prompt_format,
     build_system_prompt,
 )
-from butler.agent.provider import AnthropicProvider, GeminiProvider, OllamaProvider
+from butler.agent.provider import AnthropicProvider, GeminiProvider, NvidiaProvider, OllamaProvider
 from butler.agent.schema import ClarifyAction, FinalAction, ToolCallAction
 from butler.config import ButlerConfig
 from butler.db import ButlerDB
@@ -265,6 +265,15 @@ class AgentRuntime:
             elif self.config.provider == "claude":
                 self.provider = AnthropicProvider(
                     api_keys=self.config.claude_api_keys,
+                    model=self.config.model,
+                    fallback_models=self.config.fallback_models,
+                    timeout_seconds=self.config.model_timeout_seconds,
+                    retry_count=self.config.model_retry_count,
+                    total_timeout_seconds=self.config.model_total_timeout_seconds,
+                )
+            elif self.config.provider == "nvidia":
+                self.provider = NvidiaProvider(
+                    api_keys=self.config.nvidia_api_keys,
                     model=self.config.model,
                     fallback_models=self.config.fallback_models,
                     timeout_seconds=self.config.model_timeout_seconds,

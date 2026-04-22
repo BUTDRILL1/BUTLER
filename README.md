@@ -1,11 +1,11 @@
-# BUTLER (v2.2) Update: Model and API Key rotation + multi-key API support
+# BUTLER (v2.3) Update: NVIDIA NIM API support added
 
 BUTLER is an advanced AI assistant that operates on your local machine. It combines the privacy and control of local-first tools with the immense reasoning speed of cutting-edge APIs, all wrapped up in a sleek, voice-activated desktop widget.
 
 ## Key Features
 - **Sleek Desktop GUI**: A floating, draggable widget out-of-the-box (`--gui`).
 - **Voice Capabilities**: Built-in Speech-to-Text (`faster-whisper`), continuous Wake-Word detection, and premium Text-to-Speech (`edge-tts`). 
-- **Tri-Provider Architecture**: Run completely offline using **Ollama**, or switch to ultra-fast cloud inference using the **Gemini API** (`--gem`) or **Anthropic Claude API** (`--claude`). 
+- **Quad-Provider Architecture**: Run completely offline using **Ollama**, or switch to ultra-fast cloud inference using the **Gemini API** (`--gem`), **Anthropic Claude API** (`--claude`), or **Nvidia NIM API** (`--nvidia`). 
 - **High Availability & Failover**: Automatic multi-key API rotation with mandatory labels, and intelligent model fallback rotation if endpoints hit rate-limits or experience outages.
 - **Safe-by-default**: File access is tightly allowlisted; write actions require explicit confirmation.
 - **Persistent Memory**: Stores chat, tool audit logs, and note metadata in thread-safe SQLite.
@@ -106,8 +106,9 @@ Inside BUTLER home you will find:
 **Configuration Flags:**
 - Manage API Keys & Settings: `butler --change`
 - Enable Gemini Provider: `butler --gem` or `butler --gemini`
+- Enable Nvidia Provider: `butler --nvidia` or `butler --nim`
 - Launch GUI: `butler --gui`
-- Override Provider via Env: `BUTLER_PROVIDER=gemini` or `BUTLER_PROVIDER=ollama`
+- Override Provider via Env: `BUTLER_PROVIDER=gemini`, `BUTLER_PROVIDER=claude`, `BUTLER_PROVIDER=nvidia`, or `BUTLER_PROVIDER=ollama`
 - Default Local Model: `BUTLER_MODEL=mistral:7b-instruct`
 
 ## Debugging

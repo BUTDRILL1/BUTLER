@@ -20,6 +20,7 @@ class ButlerConfig(BaseModel):
     provider: str = Field(default_factory=lambda: os.getenv("BUTLER_PROVIDER", "ollama"))
     gemini_api_keys: list[ApiKeyConfig] = Field(default_factory=list)
     claude_api_keys: list[ApiKeyConfig] = Field(default_factory=list)
+    nvidia_api_keys: list[ApiKeyConfig] = Field(default_factory=list)
 
     # Convenience properties for the active (first) key
     @property
@@ -30,17 +31,21 @@ class ButlerConfig(BaseModel):
     def claude_api_key(self) -> str:
         return self.claude_api_keys[0].key if self.claude_api_keys else ""
 
+    @property
+    def nvidia_api_key(self) -> str:
+        return self.nvidia_api_keys[0].key if self.nvidia_api_keys else ""
+
     @model_validator(mode="before")
     @classmethod
     def _migrate_single_keys(cls, data: dict) -> dict:
         """Backward compat: migrate old single-string or list-of-string key fields to ApiKeyConfig format."""
         if isinstance(data, dict):
-            for old, new in (("gemini_api_key", "gemini_api_keys"), ("claude_api_key", "claude_api_keys")):
+            for old, new in (("gemini_api_key", "gemini_api_keys"), ("claude_api_key", "claude_api_keys"), ("nvidia_api_key", "nvidia_api_keys")):
                 if old in data and new not in data:
                     val = data.pop(old)
                     data[new] = [val] if val else []
                     
-            for key_field in ("gemini_api_keys", "claude_api_keys"):
+            for key_field in ("gemini_api_keys", "claude_api_keys", "nvidia_api_keys"):
                 if key_field in data and isinstance(data[key_field], list):
                     migrated = []
                     for item in data[key_field]:
@@ -59,6 +64,10 @@ class ButlerConfig(BaseModel):
                 env = os.getenv("BUTLER_CLAUDE_API_KEY", "")
                 if env:
                     data["claude_api_keys"] = [{"key": env, "label": "env"}]
+            if not data.get("nvidia_api_keys"):
+                env = os.getenv("BUTLER_NVIDIA_API_KEY", "")
+                if env:
+                    data["nvidia_api_keys"] = [{"key": env, "label": "env"}]
         return data
     spotify_client_id: str = Field(default_factory=lambda: os.getenv("BUTLER_SPOTIFY_CLIENT_ID", ""))
     spotify_client_secret: str = Field(default_factory=lambda: os.getenv("BUTLER_SPOTIFY_CLIENT_SECRET", ""))

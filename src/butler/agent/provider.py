@@ -461,3 +461,161 @@ class AnthropicProvider:
         finally:
             if resp is not None:
                 resp.close()
+
+
+@dataclass
+class NvidiaProvider:
+    api_keys: list[Any]
+    model: str = "mistralai/mistral-nemotron"
+    timeout_seconds: int = 60
+    retry_count: int = 0
+    total_timeout_seconds: int = 0
+    retry_backoff_seconds: float = 0.3
+    fallback_models: list[str] = field(default_factory=list)
+    _session: requests.Session = field(init=False, repr=False, compare=False)
+    _key_index: int = field(init=False, repr=False, compare=False, default=0)
+    _model_index: int = field(init=False, repr=False, compare=False, default=0)
+
+    @property
+    def active_model(self) -> str:
+        models = [self.model] + self.fallback_models
+        return models[self._model_index % len(models)]
+
+    def _rotate_model(self) -> bool:
+        models = [self.model] + self.fallback_models
+        if len(models) <= 1:
+            return False
+        self._model_index = (self._model_index + 1) % len(models)
+        self._key_index = 0
+        return True
+
+    @property
+    def api_key(self) -> str:
+        return self.api_keys[self._key_index % len(self.api_keys)].key if self.api_keys else ""
+
+    def _rotate_key(self) -> bool:
+        if len(self.api_keys) <= 1:
+            return False
+        self._key_index = (self._key_index + 1) % len(self.api_keys)
+        self._session.headers.update({"Authorization": f"Bearer {self.api_key}"})
+        return True
+
+    def __post_init__(self) -> None:
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        })
+
+    def _format_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+
+    def _is_retryable(self, status_code: int) -> bool:
+        return status_code in (429, 503)
+
+    def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> str:
+        current_model = model or self.active_model
+        url = "https://integrate.api.nvidia.com/v1/chat/completions"
+        
+        formatted_messages = self._format_messages(messages)
+        
+        payload = {
+            "model": current_model,
+            "max_tokens": 4096,
+            "messages": formatted_messages,
+            "temperature": temperature
+        }
+            
+        max_attempts = 1 + max(0, int(self.retry_count))
+        start = time.time()
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            if self.total_timeout_seconds and (time.time() - start) > float(self.total_timeout_seconds):
+                break
+            try:
+                resp = self._session.post(url, json=payload, timeout=self.timeout_seconds)
+                try:
+                    if resp.status_code >= 400:
+                        if self._is_retryable(resp.status_code):
+                            if self._rotate_key():
+                                time.sleep(self.retry_backoff_seconds)
+                                continue
+                            elif self._rotate_model():
+                                time.sleep(self.retry_backoff_seconds)
+                                current_model = model or self.active_model
+                                payload["model"] = current_model
+                                continue
+                        elif resp.status_code in (500, 502, 503, 504, 404):
+                            if self._rotate_model():
+                                time.sleep(self.retry_backoff_seconds)
+                                current_model = model or self.active_model
+                                payload["model"] = current_model
+                                continue
+                        raise ModelProviderError(f"Nvidia error {resp.status_code}: {resp.text}")
+                    data = resp.json()
+                finally:
+                    resp.close()
+                return data["choices"][0]["message"]["content"].strip()
+            except requests.RequestException as e:
+                last_error = e
+            except ModelProviderError as e:
+                raise
+            except (KeyError, IndexError) as e:
+                raise ModelProviderError(f"Unexpected Nvidia response structure: {e}")
+
+            if attempt < max_attempts:
+                time.sleep(self.retry_backoff_seconds)
+
+        elapsed = time.time() - start
+        budget = self.total_timeout_seconds
+        attempts_used = min(max_attempts, attempt)
+        base = f"Model call failed after {attempts_used} attempt(s) in {elapsed:.1f}s"
+        if budget:
+            base += f" (budget {budget}s)"
+        if last_error:
+            raise ModelProviderError(f"{base}: {last_error}") from last_error
+        raise ModelProviderError(base)
+
+    def chat_stream(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> Any:
+        current_model = model or self.active_model
+        url = "https://integrate.api.nvidia.com/v1/chat/completions"
+        
+        formatted_messages = self._format_messages(messages)
+        
+        payload = {
+            "model": current_model,
+            "max_tokens": 4096,
+            "messages": formatted_messages,
+            "temperature": temperature,
+            "stream": True
+        }
+
+        resp = None
+        try:
+            resp = self._session.post(url, json=payload, stream=True, timeout=(10, self.timeout_seconds))
+            if resp.status_code >= 400:
+                if self._is_retryable(resp.status_code) and self._rotate_key():
+                    resp.close()
+                    yield from self.chat_stream(messages, temperature=temperature, model=model)
+                    return
+                elif resp.status_code in (500, 502, 503, 504, 404):
+                    if self._rotate_model():
+                        resp.close()
+                        yield from self.chat_stream(messages, temperature=temperature, model=model)
+                        return
+                raise ModelProviderError(f"Nvidia error {resp.status_code}: {resp.text}")
+            for line in resp.iter_lines():
+                if line.startswith(b"data: "):
+                    line_data = line[6:]
+                    if line_data.strip() == b"[DONE]":
+                        continue
+                    chunk = json.loads(line_data)
+                    token = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                    if token:
+                        yield token
+        except (requests.RequestException, json.JSONDecodeError) as e:
+            raise ModelProviderError(f"Model stream failed: {e}") from e
+        finally:
+            if resp is not None:
+                resp.close()
