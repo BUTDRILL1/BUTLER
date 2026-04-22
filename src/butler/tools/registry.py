@@ -14,6 +14,8 @@ from butler.tools.impl import notes as notes_tools
 from butler.tools.impl import system as system_tools
 from butler.tools.impl import weather as weather_tools
 from butler.tools.impl import web as web_tools
+from butler.tools.impl import os_control as os_tools
+from butler.tools.impl import spotify_control as spotify_tools
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,10 @@ def build_default_tool_registry(config: ButlerConfig, db: ButlerDB) -> ToolRegis
     for t in weather_tools.build():
         add(t)
     for t in web_tools.build():
+        add(t)
+    for t in os_tools.build():
+        add(t)
+    for t in spotify_tools.build():
         add(t)
 
     return ToolRegistry(config=config, db=db, sandbox=sandbox, tools=tools)

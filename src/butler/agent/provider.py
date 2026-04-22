@@ -20,17 +20,31 @@ class OllamaProvider:
     retry_count: int = 0
     total_timeout_seconds: int = 0
     retry_backoff_seconds: float = 0.3
+    fallback_models: list[str] = field(default_factory=list)
     _session: requests.Session = field(init=False, repr=False, compare=False)
     _chat_url: str = field(init=False, repr=False, compare=False)
+    _model_index: int = field(init=False, repr=False, compare=False, default=0)
+
+    @property
+    def active_model(self) -> str:
+        models = [self.model] + self.fallback_models
+        return models[self._model_index % len(models)]
+
+    def _rotate_model(self) -> bool:
+        models = [self.model] + self.fallback_models
+        if len(models) <= 1:
+            return False
+        self._model_index = (self._model_index + 1) % len(models)
+        return True
 
     def __post_init__(self) -> None:
         self._session = requests.Session()
         self._chat_url = self.base_url.rstrip("/") + "/api/chat"
 
     def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> str:
-        active_model = model or self.model
+        current_model = model or self.active_model
         payload = {
-            "model": active_model,
+            "model": current_model,
             "stream": False,
             "messages": messages,
             "options": {"temperature": temperature},
@@ -47,6 +61,12 @@ class OllamaProvider:
                 resp = self._session.post(self._chat_url, json=payload, timeout=self.timeout_seconds)
                 try:
                     if resp.status_code >= 400:
+                        if resp.status_code in (500, 502, 503, 504, 404):
+                            if self._rotate_model():
+                                time.sleep(self.retry_backoff_seconds)
+                                current_model = model or self.active_model
+                                payload["model"] = current_model
+                                continue
                         raise ModelProviderError(f"Ollama error {resp.status_code}: {resp.text}")
                     data = resp.json()
                 finally:
@@ -76,9 +96,9 @@ class OllamaProvider:
         raise ModelProviderError(base)
 
     def chat_stream(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> Any:
-        active_model = model or self.model
+        current_model = model or self.active_model
         payload = {
-            "model": active_model,
+            "model": current_model,
             "stream": True,
             "messages": messages,
             "options": {"temperature": temperature},
@@ -88,6 +108,11 @@ class OllamaProvider:
         try:
             resp = self._session.post(self._chat_url, json=payload, stream=True, timeout=(10, self.timeout_seconds))
             if resp.status_code >= 400:
+                if resp.status_code in (500, 502, 503, 504, 404):
+                    if self._rotate_model():
+                        resp.close()
+                        yield from self.chat_stream(messages, temperature=temperature, model=model)
+                        return
                 raise ModelProviderError(f"Ollama error {resp.status_code}: {resp.text}")
             for line in resp.iter_lines():
                 if line:
@@ -104,13 +129,39 @@ class OllamaProvider:
 
 @dataclass
 class GeminiProvider:
-    api_key: str
+    api_keys: list[Any]
     model: str = "gemini-2.5-flash"
     timeout_seconds: int = 60
     retry_count: int = 0
     total_timeout_seconds: int = 0
     retry_backoff_seconds: float = 0.3
+    fallback_models: list[str] = field(default_factory=list)
     _session: requests.Session = field(init=False, repr=False, compare=False)
+    _key_index: int = field(init=False, repr=False, compare=False, default=0)
+    _model_index: int = field(init=False, repr=False, compare=False, default=0)
+
+    @property
+    def active_model(self) -> str:
+        models = [self.model] + self.fallback_models
+        return models[self._model_index % len(models)]
+
+    def _rotate_model(self) -> bool:
+        models = [self.model] + self.fallback_models
+        if len(models) <= 1:
+            return False
+        self._model_index = (self._model_index + 1) % len(models)
+        self._key_index = 0
+        return True
+
+    @property
+    def api_key(self) -> str:
+        return self.api_keys[self._key_index % len(self.api_keys)].key if self.api_keys else ""
+
+    def _rotate_key(self) -> bool:
+        if len(self.api_keys) <= 1:
+            return False
+        self._key_index = (self._key_index + 1) % len(self.api_keys)
+        return True
 
     def __post_init__(self) -> None:
         self._session = requests.Session()
@@ -129,9 +180,11 @@ class GeminiProvider:
 
         return contents, system_instruction
 
+    def _is_retryable(self, status_code: int) -> bool:
+        return status_code in (429, 503)
+
     def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> str:
-        active_model = model or self.model
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{active_model}:generateContent?key={self.api_key}"
+        current_model = model or self.active_model
         
         contents, system_instruction = self._format_messages(messages)
         
@@ -145,14 +198,32 @@ class GeminiProvider:
         max_attempts = 1 + max(0, int(self.retry_count))
         start = time.time()
         last_error: Exception | None = None
+        keys_tried = 0
 
         for attempt in range(1, max_attempts + 1):
             if self.total_timeout_seconds and (time.time() - start) > float(self.total_timeout_seconds):
                 break
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={self.api_key}"
             try:
                 resp = self._session.post(url, json=payload, timeout=self.timeout_seconds)
                 try:
                     if resp.status_code >= 400:
+                        if self._is_retryable(resp.status_code):
+                            if self._rotate_key():
+                                keys_tried += 1
+                                time.sleep(self.retry_backoff_seconds)
+                                continue
+                            elif self._rotate_model():
+                                keys_tried = 0
+                                time.sleep(self.retry_backoff_seconds)
+                                current_model = model or self.active_model
+                                continue
+                        elif resp.status_code in (500, 502, 503, 504, 404):
+                            if self._rotate_model():
+                                keys_tried = 0
+                                time.sleep(self.retry_backoff_seconds)
+                                current_model = model or self.active_model
+                                continue
                         raise ModelProviderError(f"Gemini error {resp.status_code}: {resp.text}")
                     data = resp.json()
                 finally:
@@ -179,8 +250,8 @@ class GeminiProvider:
         raise ModelProviderError(base)
 
     def chat_stream(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> Any:
-        active_model = model or self.model
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{active_model}:streamGenerateContent?alt=sse&key={self.api_key}"
+        current_model = model or self.active_model
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:streamGenerateContent?alt=sse&key={self.api_key}"
         
         contents, system_instruction = self._format_messages(messages)
         
@@ -195,6 +266,16 @@ class GeminiProvider:
         try:
             resp = self._session.post(url, json=payload, stream=True, timeout=(10, self.timeout_seconds))
             if resp.status_code >= 400:
+                if self._is_retryable(resp.status_code):
+                    if self._rotate_key() or self._rotate_model():
+                        resp.close()
+                        yield from self.chat_stream(messages, temperature=temperature, model=model)
+                        return
+                elif resp.status_code in (500, 502, 503, 504, 404):
+                    if self._rotate_model():
+                        resp.close()
+                        yield from self.chat_stream(messages, temperature=temperature, model=model)
+                        return
                 raise ModelProviderError(f"Gemini error {resp.status_code}: {resp.text}")
             for line in resp.iter_lines():
                 if line.startswith(b"data: "):
@@ -216,13 +297,40 @@ class GeminiProvider:
 
 @dataclass
 class AnthropicProvider:
-    api_key: str
+    api_keys: list[Any]
     model: str = "claude-3-5-sonnet-20241022"
     timeout_seconds: int = 60
     retry_count: int = 0
     total_timeout_seconds: int = 0
     retry_backoff_seconds: float = 0.3
+    fallback_models: list[str] = field(default_factory=list)
     _session: requests.Session = field(init=False, repr=False, compare=False)
+    _key_index: int = field(init=False, repr=False, compare=False, default=0)
+    _model_index: int = field(init=False, repr=False, compare=False, default=0)
+
+    @property
+    def active_model(self) -> str:
+        models = [self.model] + self.fallback_models
+        return models[self._model_index % len(models)]
+
+    def _rotate_model(self) -> bool:
+        models = [self.model] + self.fallback_models
+        if len(models) <= 1:
+            return False
+        self._model_index = (self._model_index + 1) % len(models)
+        self._key_index = 0
+        return True
+
+    @property
+    def api_key(self) -> str:
+        return self.api_keys[self._key_index % len(self.api_keys)].key if self.api_keys else ""
+
+    def _rotate_key(self) -> bool:
+        if len(self.api_keys) <= 1:
+            return False
+        self._key_index = (self._key_index + 1) % len(self.api_keys)
+        self._session.headers.update({"x-api-key": self.api_key})
+        return True
 
     def __post_init__(self) -> None:
         self._session = requests.Session()
@@ -246,14 +354,17 @@ class AnthropicProvider:
 
         return contents, system_instruction
 
+    def _is_retryable(self, status_code: int) -> bool:
+        return status_code in (429, 503)
+
     def chat(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> str:
-        active_model = model or self.model
+        current_model = model or self.active_model
         url = "https://api.anthropic.com/v1/messages"
         
         contents, system_instruction = self._format_messages(messages)
         
         payload = {
-            "model": active_model,
+            "model": current_model,
             "max_tokens": 4096,
             "messages": contents,
             "temperature": temperature
@@ -272,6 +383,21 @@ class AnthropicProvider:
                 resp = self._session.post(url, json=payload, timeout=self.timeout_seconds)
                 try:
                     if resp.status_code >= 400:
+                        if self._is_retryable(resp.status_code):
+                            if self._rotate_key():
+                                time.sleep(self.retry_backoff_seconds)
+                                continue
+                            elif self._rotate_model():
+                                time.sleep(self.retry_backoff_seconds)
+                                current_model = model or self.active_model
+                                payload["model"] = current_model
+                                continue
+                        elif resp.status_code in (500, 502, 503, 504, 404):
+                            if self._rotate_model():
+                                time.sleep(self.retry_backoff_seconds)
+                                current_model = model or self.active_model
+                                payload["model"] = current_model
+                                continue
                         raise ModelProviderError(f"Anthropic error {resp.status_code}: {resp.text}")
                     data = resp.json()
                 finally:
@@ -317,6 +443,10 @@ class AnthropicProvider:
         try:
             resp = self._session.post(url, json=payload, stream=True, timeout=(10, self.timeout_seconds))
             if resp.status_code >= 400:
+                if self._is_retryable(resp.status_code) and self._rotate_key():
+                    resp.close()
+                    yield from self.chat_stream(messages, temperature=temperature, model=model)
+                    return
                 raise ModelProviderError(f"Anthropic error {resp.status_code}: {resp.text}")
             for line in resp.iter_lines():
                 if line.startswith(b"data: "):

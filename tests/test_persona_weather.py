@@ -43,7 +43,7 @@ def test_persona_keeps_boss_tone_and_no_tool_filler(tmp_path, monkeypatch) -> No
     out = runtime.chat_once("Hi")
 
     assert out == "Hello there."
-    assert any("The user is your Boss" in p for p in seen)
+    assert any("always address him by 'Boss'" in p for p in seen)
     assert any("Do not mention tools" in p for p in seen)
     assert all("datetime" not in p.lower() for p in seen)
     assert seen_models == ["gemma:2b"]

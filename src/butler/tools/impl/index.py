@@ -14,6 +14,31 @@ class SyncArgs(BaseModel):
 
 
 TEXT_EXTS = {".md", ".txt"}
+PDF_EXTS = {".pdf"}
+
+
+def _read_pdf_text(path: Path) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError as e:  # pragma: no cover - dependency missing is handled at runtime
+        raise ToolError("PDF support requires the 'pypdf' package.") from e
+
+    reader = PdfReader(str(path))
+    pages: list[str] = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        if text.strip():
+            pages.append(text)
+    return "\n".join(pages).strip()
+
+
+def _extract_index_text(path: Path) -> tuple[str | None, bool]:
+    suffix = path.suffix.lower()
+    if suffix in TEXT_EXTS:
+        return path.read_text(encoding="utf-8", errors="replace"), False
+    if suffix in PDF_EXTS:
+        return _read_pdf_text(path), True
+    return None, False
 
 
 def _index_sync(ctx: ToolContext, args: SyncArgs) -> dict[str, Any]:
@@ -36,14 +61,19 @@ def _index_sync(ctx: ToolContext, args: SyncArgs) -> dict[str, Any]:
             if not path.is_file():
                 continue
             scanned += 1
-            if path.suffix.lower() not in TEXT_EXTS:
+            if path.suffix.lower() not in TEXT_EXTS | PDF_EXTS:
                 skipped_binary += 1
                 continue
             size = path.stat().st_size
             if size > ctx.config.max_file_bytes:
                 skipped_large += 1
                 continue
-            content = path.read_text(encoding="utf-8", errors="replace")
+            content, is_pdf = _extract_index_text(path)
+            if content is None:
+                skipped_binary += 1
+                continue
+            if is_pdf and not content.strip():
+                content = f"{path.name}"
             ctx.db.conn.execute(
                 "INSERT INTO files_fts (path, content) VALUES (?, ?)",
                 (str(path), content),
@@ -55,11 +85,11 @@ def _index_sync(ctx: ToolContext, args: SyncArgs) -> dict[str, Any]:
     return {
         "roots": [str(r) for r in ctx.sandbox.allowed_roots],
         "scanned": scanned,
-        "indexed": indexed,
-        "skipped_large": skipped_large,
-        "skipped_non_text": skipped_binary,
-        "elapsed_ms": elapsed_ms,
-    }
+            "indexed": indexed,
+            "skipped_large": skipped_large,
+            "skipped_non_text": skipped_binary,
+            "elapsed_ms": elapsed_ms,
+        }
 
 
 def build() -> list[Tool]:

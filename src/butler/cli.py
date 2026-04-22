@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import argparse
 import json
 import logging
 import os
+import random
 import sqlite3
 import shlex
 import sys
@@ -13,9 +15,13 @@ import time
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from edge_tts import list_voices
 
 from butler.agent.loop import AgentRuntime
 from butler.config import ButlerConfig, load_config, save_config
+from butler.cli_menu import MenuItem, mask_secret, prompt_text, select_menu
 from butler.db import ButlerDB
 from butler.paths import butler_home_dir
 from butler.sandbox import PathSandbox
@@ -62,6 +68,120 @@ def _confirm(prompt: str, assume_no: bool = True) -> bool:
 
 def _print_json(obj: object) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
+
+
+def _manage_api_keys(config: ButlerConfig, provider_name: str, keys_field: str) -> ButlerConfig:
+    """Interactive loop: show existing keys, add one at a time, detect duplicates."""
+    from butler.config import ApiKeyConfig
+    keys: list[ApiKeyConfig] = list(getattr(config, keys_field))
+    while True:
+        print(f"\n--- {provider_name} API Keys ({len(keys)} loaded) ---")
+        for i, k in enumerate(keys, 1):
+            print(f"  {i}. {mask_secret(k.key)} ({k.label})")
+        if not keys:
+            print("  (none)")
+
+        new_key = input("\nEnter new key (or press Enter to go back): ").strip()
+        if not new_key:
+            break
+        if any(k.key == new_key for k in keys):
+            print("  ⚠ Key already exists. Skipped.")
+        else:
+            while True:
+                new_label = input("Enter a label/comment for this key (mandatory): ").strip()
+                if new_label:
+                    break
+                print("  ⚠ Label cannot be empty. Please provide a comment.")
+            keys.append(ApiKeyConfig(key=new_key, label=new_label))
+            print("  ✓ Key added.")
+
+        more = input("Add another? [y/N]: ").strip().lower()
+        if more not in ("y", "yes"):
+            break
+
+    new_config = config.model_copy(update={keys_field: keys})
+    save_config(new_config)
+    return new_config
+
+
+def _changeable_config_items(config: ButlerConfig) -> list[MenuItem[str]]:
+    return [
+        MenuItem("Gemini API Keys", "gemini_api_keys", f"{len(config.gemini_api_keys)} keys loaded"),
+        MenuItem("Claude API Keys", "claude_api_keys", f"{len(config.claude_api_keys)} keys loaded"),
+        MenuItem("Spotify Client ID", "spotify_client_id", f"Current: {mask_secret(config.spotify_client_id)}"),
+        MenuItem("Spotify Client Secret", "spotify_client_secret", f"Current: {mask_secret(config.spotify_client_secret)}"),
+        MenuItem("STT Model", "stt_model", f"Current: {config.stt_model}"),
+        MenuItem("STT Language", "stt_language", f"Current: {config.stt_language}"),
+        MenuItem("Default Voice", "voice", f"Current: {config.voice}"),
+        MenuItem("Fallback Models", "fallback_models", f"Current: {', '.join(config.fallback_models) or 'none'}"),
+    ]
+
+
+
+def _load_edge_voices() -> list[dict[str, Any]]:
+    voices = asyncio.run(list_voices())
+    voices.sort(key=lambda v: (v.get("Locale", ""), v.get("Gender", ""), v.get("ShortName", "")))
+    return voices
+
+
+def _select_voice(config: ButlerConfig) -> ButlerConfig:
+    try:
+        voices = _load_edge_voices()
+    except Exception as e:  # noqa: BLE001
+        print(f"Could not load voices: {e}")
+        return config
+
+    items = [
+        MenuItem(
+            label=f"{voice.get('ShortName', 'Unknown')} ({voice.get('Locale', '')}, {voice.get('Gender', '')})",
+            value=voice,
+            description=voice.get("FriendlyName", ""),
+        )
+        for voice in voices
+    ]
+    selected = select_menu("Choose a default TTS voice", items, page_size=12)
+    if selected is None:
+        return config
+
+    voice_name = selected.value.get("ShortName", config.voice)
+    new_config = config.model_copy(update={"voice": voice_name})
+    save_config(new_config)
+    print(f"Saved voice: {voice_name}")
+    return new_config
+
+
+def _change_config_value(config: ButlerConfig) -> ButlerConfig:
+    while True:
+        selected = select_menu("\n--- BUTLER Configuration ---\nSelect provider to configure", _changeable_config_items(config), page_size=8)
+        if selected is None:
+            return config
+
+        key = selected.value
+        if key == "voice":
+            config = _select_voice(config)
+            continue
+        if key in ("gemini_api_keys", "claude_api_keys"):
+            label = "Gemini" if "gemini" in key else "Claude"
+            config = _manage_api_keys(config, label, key)
+            continue
+
+        secret_fields = {"spotify_client_id", "spotify_client_secret"}
+        
+        if key == "fallback_models":
+            current_value = ", ".join(getattr(config, key))
+            new_value_str = prompt_text("Fallback Models (comma separated)", current=current_value)
+            if new_value_str is None:
+                continue
+            new_value = [m.strip() for m in new_value_str.split(",") if m.strip()]
+        else:
+            current_value = getattr(config, key)
+            new_value = prompt_text(selected.label, current=str(current_value), secret=key in secret_fields)
+            if new_value is None:
+                continue
+
+        config = config.model_copy(update={key: new_value})
+        save_config(config)
+        print(f"Saved {selected.label}.")
 
 
 def _cmd_roots(config: ButlerConfig, args: list[str]) -> ButlerConfig:
@@ -188,13 +308,28 @@ def _handle_slash_command(
     return config
 
 
+_BOOT_GREETINGS = [
+    "Hey Boss! BUTLER's rebooting!",
+    "Yo Boss! BUTLER's back online!",
+    "Boss! BUTLER warming up!",
+    "Rise and grind, Boss! BUTLER's loading!",
+    "BUTLER powering up, Boss!",
+]
+
+
 def main(argv: list[str] | None = None) -> int:
+    os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
     argv = argv if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(prog="butler")
     parser.add_argument("--chat", nargs="*", help="One-shot chat prompt")
     parser.add_argument("--gem", "--gemini", action="store_true", help="Use Gemini API instead of local Ollama")
     parser.add_argument("--gui", action="store_true", help="Launch the graphical floating widget")
     parser.add_argument("--claude", action="store_true", help="Use Anthropic Claude API instead of local Ollama")
+    parser.add_argument("--change", action="store_true", help="Change configured keys and settings")
+    parser.add_argument("--voice", action="store_true", help="Pick and save a default TTS voice")
+    parser.add_argument("--auth-spotify", action="store_true", help="Authenticate Spotify safely before launching the voice loop")
     ns = parser.parse_args(argv)
 
     log_level = os.getenv("BUTLER_LOG_LEVEL", "").strip().upper()
@@ -202,6 +337,43 @@ def main(argv: list[str] | None = None) -> int:
         logging.basicConfig(level=getattr(logging, log_level, logging.INFO), format="%(levelname)s %(name)s: %(message)s")
 
     config = load_config()
+    from butler.config import save_config
+    
+    if ns.change:
+        config = _change_config_value(config)
+
+    if ns.voice:
+        config = _select_voice(config)
+
+    if ns.change or ns.voice:
+        return 0
+
+    if ns.auth_spotify:
+        if not config.spotify_client_id or not config.spotify_client_secret:
+            print("Error: Please run 'butler --change' first to set your Spotify Client ID and Secret.")
+            return 1
+            
+        print("\n--- Initializing Spotify Authentication ---")
+        print("A browser window will now open. Click 'Agree'.")
+        print("When redirected to a 'Site cannot be reached' page, copy the ENTIRE URL (https://localhost:8080/?code=...).")
+        print("Paste that URL below and hit Enter.\n")
+        
+        import spotipy
+        from spotipy.oauth2 import SpotifyOAuth
+        
+        auth_manager = SpotifyOAuth(
+            client_id=config.spotify_client_id,
+            client_secret=config.spotify_client_secret,
+            redirect_uri="http://127.0.0.1:8080",
+            scope="user-read-playback-state user-modify-playback-state user-read-currently-playing",
+            open_browser=True
+        )
+        
+        # This will forcefully trigger the flow and generate the .cache file
+        sp = spotipy.Spotify(auth_manager=auth_manager)
+        sp.current_user() # Test the connection
+        print("\nSuccessfully linked Spotify account! The token has been cached. You can now use voice commands.")
+        return 0
     
     if ns.gem:
         config = config.model_copy(update={
@@ -219,23 +391,23 @@ def main(argv: list[str] | None = None) -> int:
 
     from butler.config import save_config
         
-    if config.provider == "gemini" and not config.gemini_api_key:
+    if config.provider == "gemini" and not config.gemini_api_keys:
         print("Gemini API key is required but not found in configuration.")
         key = input("Please enter your Gemini API key: ").strip()
         if not key:
             print("Error: API key cannot be empty.")
             return 2
-        config = config.model_copy(update={"gemini_api_key": key})
+        config = config.model_copy(update={"gemini_api_keys": [{"key": key, "label": "default"}]})
         # Save to config to persist
         save_config(config)
 
-    if config.provider == "claude" and not config.claude_api_key:
+    if config.provider == "claude" and not config.claude_api_keys:
         print("Anthropic Claude API key is required but not found in configuration.")
         key = input("Please enter your Anthropic API key: ").strip()
         if not key:
             print("Error: API key cannot be empty.")
             return 2
-        config = config.model_copy(update={"claude_api_key": key})
+        config = config.model_copy(update={"claude_api_keys": [{"key": key, "label": "default"}]})
         # Save to config to persist
         save_config(config)
 
@@ -265,6 +437,8 @@ def main(argv: list[str] | None = None) -> int:
         from butler.gui import ButlerWidget
         from butler.voice.engine import VoiceEngine
 
+        print(random.choice(_BOOT_GREETINGS))
+
         def on_stt_command(text: str):
             print(f"Heard: {text}")
             state.widget.after(0, lambda: state.widget.set_status("Thinking..."))
@@ -289,7 +463,9 @@ def main(argv: list[str] | None = None) -> int:
             if hasattr(state, "widget"):
                 state.widget.after(0, lambda: state.widget.set_status(s))
                 
-        engine = VoiceEngine(on_command_callback=on_stt_command, status_callback=safe_status)
+        engine = VoiceEngine(on_command_callback=on_stt_command, status_callback=safe_status, config=config)
+        print("At your service, Boss.")
+        engine.play_tts("At your service, Boss.")
         state.widget = ButlerWidget(on_mic_click=engine.trigger_manual_listen, 
                                     on_wake_toggle=engine.toggle_wake_word)
         state.widget.mainloop()

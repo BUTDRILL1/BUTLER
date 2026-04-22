@@ -226,6 +226,19 @@ def _clean_factual_search_query(text: str) -> str:
     return cleaned or text.strip()
 
 
+def _get_fallback_error_message(e: Exception) -> str:
+    error_str = str(e).lower()
+    if "token" in error_str or "quota" in error_str or "exhaust" in error_str:
+        return "I guess I am done, Boss!"
+    if "503" in error_str or "429" in error_str or "too many" in error_str or "unavailable" in error_str or "overloaded" in error_str:
+        return "Sorry Boss! My brain rotted, try again."
+    if "401" in error_str or "403" in error_str or "api-key" in error_str or "authentication" in error_str or "unauthorized" in error_str:
+        return "Well Boss! seems like I'm grounded."
+    if "timeout" in error_str:
+        return "Took quite some time and yet I couldn't fetch that. Wanna try again, Boss?"
+    return "Sorry Boss! Didn't get you. Wanna go again?"
+
+
 @dataclass
 class AgentRuntime:
     config: ButlerConfig
@@ -242,16 +255,18 @@ class AgentRuntime:
         if self.provider is None:
             if self.config.provider == "gemini":
                 self.provider = GeminiProvider(
-                    api_key=self.config.gemini_api_key,
+                    api_keys=self.config.gemini_api_keys,
                     model=self.config.model,
+                    fallback_models=self.config.fallback_models,
                     timeout_seconds=self.config.model_timeout_seconds,
                     retry_count=self.config.model_retry_count,
                     total_timeout_seconds=self.config.model_total_timeout_seconds,
                 )
             elif self.config.provider == "claude":
                 self.provider = AnthropicProvider(
-                    api_key=self.config.claude_api_key,
+                    api_keys=self.config.claude_api_keys,
                     model=self.config.model,
+                    fallback_models=self.config.fallback_models,
                     timeout_seconds=self.config.model_timeout_seconds,
                     retry_count=self.config.model_retry_count,
                     total_timeout_seconds=self.config.model_total_timeout_seconds,
@@ -260,6 +275,7 @@ class AgentRuntime:
                 self.provider = OllamaProvider(
                     base_url=self.config.ollama_url,
                     model=self.config.model,
+                    fallback_models=self.config.fallback_models,
                     timeout_seconds=self.config.model_timeout_seconds,
                     retry_count=self.config.model_retry_count,
                     total_timeout_seconds=self.config.model_total_timeout_seconds,
@@ -307,7 +323,7 @@ class AgentRuntime:
             return self._provider_chat(messages, temperature=0.2, model=model)
         except Exception as e:  # noqa: BLE001
             logger.warning("chat_mode_failed model=%s error=%s", model, e)
-            return "Sorry, I had trouble understanding that. Try rephrasing."
+            return _get_fallback_error_message(e)
 
     def _chat_mode_reply_stream(self, model: str) -> Any:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self._chat_system_prompt}]
@@ -327,7 +343,7 @@ class AgentRuntime:
                 yield token
         except Exception as e:
             logger.warning("chat_stream_failed model=%s error=%s", model, e)
-            yield "Sorry, I had trouble understanding that. Try rephrasing."
+            yield _get_fallback_error_message(e)
 
     def _stream_summarize(self, user_text: str, results_json: dict) -> Any:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self._chat_system_prompt}]
@@ -792,6 +808,18 @@ class AgentRuntime:
                     action_messages.append({"role": "assistant", "content": json.dumps(action.model_dump(), ensure_ascii=False)})
                     action_messages.append({"role": "user", "content": f"TOOL_ERROR {action.name}: {e}"})
                     continue
+
+                if result.get("needs_clarification") and isinstance(result.get("question"), str):
+                    assistant_text = result["question"]
+                    self.db.add_message(self.conversation_id, "assistant", assistant_text)
+                    yield assistant_text
+                    logger.info(
+                        "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=tool_clarify",
+                        self.conversation_id,
+                        route,
+                        int((time.perf_counter() - turn_started) * 1000),
+                    )
+                    return
 
                 action_messages.append({"role": "assistant", "content": json.dumps(action.model_dump(), ensure_ascii=False)})
                 action_messages.append({"role": "user", "content": f"TOOL_RESULT {action.name}: {json.dumps(result, ensure_ascii=False)}"})
