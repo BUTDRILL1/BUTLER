@@ -1,4 +1,4 @@
-# BUTLER (v2.1)
+# BUTLER (v2.2) Update: Model and API Key rotation + multi-key API support
 
 BUTLER is an advanced AI assistant that operates on your local machine. It combines the privacy and control of local-first tools with the immense reasoning speed of cutting-edge APIs, all wrapped up in a sleek, voice-activated desktop widget.
 
