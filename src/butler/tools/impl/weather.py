@@ -132,24 +132,38 @@ def _weather_current(ctx: ToolContext, args: WeatherCurrentArgs) -> dict[str, An
     latitude = resolved["latitude"]
     longitude = resolved["longitude"]
 
-    forecast = _get_json(
+    forecast_data = _get_json(
         "https://api.open-meteo.com/v1/forecast",
         params={
             "latitude": latitude,
             "longitude": longitude,
             "current": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,precipitation,weather_code,is_day",
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+            "forecast_days": 3,
             "timezone": "auto",
         },
     )
-    current = forecast.get("current") or {}
+    current = forecast_data.get("current") or {}
     weather_code = current.get("weather_code")
+
+    daily = forecast_data.get("daily") or {}
+    forecast_list = []
+    if daily and "time" in daily:
+        for i in range(len(daily["time"])):
+            code = daily["weather_code"][i]
+            forecast_list.append({
+                "date": daily["time"][i],
+                "max_temp_c": daily["temperature_2m_max"][i],
+                "min_temp_c": daily["temperature_2m_min"][i],
+                "condition": _WEATHER_CODE_LABELS.get(code, "Unknown")
+            })
 
     return {
         "location": resolved["label"],
         "resolved_from": resolved["resolved_from"],
         "latitude": latitude,
         "longitude": longitude,
-        "timezone": forecast.get("timezone"),
+        "timezone": forecast_data.get("timezone"),
         "current": {
             "temperature_c": current.get("temperature_2m"),
             "feels_like_c": current.get("apparent_temperature"),
@@ -160,6 +174,7 @@ def _weather_current(ctx: ToolContext, args: WeatherCurrentArgs) -> dict[str, An
             "weather_code": weather_code,
             "condition": _WEATHER_CODE_LABELS.get(weather_code, "Unknown"),
         },
+        "forecast": forecast_list,
     }
 
 
@@ -167,7 +182,7 @@ def build() -> list[Tool]:
     return [
         Tool(
             name="weather.current",
-            description="Get the current weather for a location, home location, or your IP-based area.",
+            description="Get the current weather. If 'location' is omitted, it defaults to the user's home_location or IP area.",
             input_model=WeatherCurrentArgs,
             handler=_weather_current,
             side_effect=False,

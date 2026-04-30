@@ -8,11 +8,6 @@ _RE_NON_WORD = re.compile(r"[^a-z0-9\s]+", re.IGNORECASE)
 _RE_SPACES = re.compile(r"\s+")
 _DEFAULT_FILLERS = {
     "please",
-    "bro",
-    "boss",
-    "hey",
-    "hi",
-    "hello",
     "kindly",
     "just",
 }

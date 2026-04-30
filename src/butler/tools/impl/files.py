@@ -89,79 +89,57 @@ def _is_bm25_missing_error(e: sqlite3.OperationalError) -> bool:
 
 
 def _files_search(ctx: ToolContext, args: SearchArgs) -> dict[str, Any]:
-    # Hard cap regardless of caller input (Gemma-friendly).
     limit = max(1, min(int(args.limit), 10))
-
-    row = ctx.db.conn.execute("SELECT 1 FROM files_fts LIMIT 1").fetchone()
-    if row is None:
-        raise ToolError("Index is empty. Run /index sync first.")
-
     query = args.query.strip()
+    
+    # 1. Semantic Search (Phase 5 Upgrade)
+    semantic_results = []
+    try:
+        mem_hits = ctx.runtime.memory.search(query, limit=limit)
+        for hit in mem_hits:
+            if hit["metadata"].get("type") == "file":
+                semantic_results.append({
+                    "path": hit["metadata"]["path"],
+                    "score": hit["score"],
+                    "snippet": _clean_snippet(_truncate(hit["content"], 200)),
+                    "method": "semantic"
+                })
+    except Exception as e:
+        print(f"Semantic Search Warning: {e}")
 
-    def format_rows(rows: list[sqlite3.Row], *, score_key: str | None) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
+    # 2. Traditional FTS Search
+    fts_results = []
+    try:
+        rows = ctx.db.conn.execute(
+            """
+            SELECT path, snippet(files_fts, 1, '', '', ' … ', 8) AS snippet
+            FROM files_fts WHERE files_fts MATCH ? LIMIT ?
+            """,
+            (query, limit),
+        ).fetchall()
         for r in rows:
-            snippet = _truncate(r["snippet"] or "", 200)
-            # Keep snippets clean for small local models.
-            snippet = _clean_snippet(snippet)
-            snippet = _truncate(snippet, 200)
-            results.append(
-                {
-                    "path": r["path"],
-                    "score": (float(r[score_key]) if score_key and r[score_key] is not None else None),
-                    "snippet": snippet,
-                }
-            )
-        # Deduplicate paths while preserving order.
-        seen: set[str] = set()
-        results = [r for r in results if not (r["path"] in seen or seen.add(r["path"]))]
-        return results[:limit]
+            fts_results.append({
+                "path": r["path"],
+                "score": 1.0, # Baseline for match
+                "snippet": _clean_snippet(_truncate(r["snippet"] or "", 200)),
+                "method": "keyword"
+            })
+    except sqlite3.OperationalError:
+        pass # Index might be empty or query invalid for FTS
 
-    # Try bm25 ranking first (stable tie-breaker on path).
-    try:
-        rows = ctx.db.conn.execute(
-            """
-            SELECT
-              path,
-              bm25(files_fts) AS score,
-              snippet(files_fts, 1, '', '', ' … ', 8) AS snippet
-            FROM files_fts
-            WHERE files_fts MATCH ?
-            ORDER BY score, path
-            LIMIT ?
-            """,
-            (query, limit * 3),
-        ).fetchall()
-        return {"query": query, "results": format_rows(rows, score_key="score")}
-    except sqlite3.OperationalError as e:
-        if _is_invalid_fts_query_error(e):
-            raise ToolError(
-                "Invalid search query (SQLite FTS syntax). Try simpler keywords, e.g. `error login`."
-            ) from e
-        if not _is_bm25_missing_error(e):
-            raise ToolError(str(e)) from e
-
-    # Fallback without bm25: stable ordering by path.
-    try:
-        rows = ctx.db.conn.execute(
-            """
-            SELECT
-              path,
-              snippet(files_fts, 1, '', '', ' … ', 8) AS snippet
-            FROM files_fts
-            WHERE files_fts MATCH ?
-            ORDER BY path
-            LIMIT ?
-            """,
-            (query, limit * 3),
-        ).fetchall()
-        return {"query": query, "results": format_rows(rows, score_key=None)}
-    except sqlite3.OperationalError as e:
-        if _is_invalid_fts_query_error(e):
-            raise ToolError(
-                "Invalid search query (SQLite FTS syntax). Try simpler keywords, e.g. `error login`."
-            ) from e
-        raise ToolError(str(e)) from e
+    # 3. Merge and Deduplicate
+    all_results = semantic_results + fts_results
+    seen_paths = set()
+    final_results = []
+    for res in all_results:
+        if res["path"] not in seen_paths:
+            final_results.append(res)
+            seen_paths.add(res["path"])
+            
+    return {
+        "query": query, 
+        "results": final_results[:limit]
+    }
 
 
 def build() -> list[Tool]:

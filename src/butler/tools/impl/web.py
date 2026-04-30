@@ -37,15 +37,20 @@ def _web_search(ctx: ToolContext, args: WebSearchArgs) -> dict[str, Any]:
         time.sleep(1.0)
     _query_last_call[cache_key] = time.time()
 
-    try:
-        ddgs = DDGS()
-        raw_results = list(ddgs.text(query, max_results=15))
-    except Exception as e:
-        raise ToolError(f"Search failed: {e}")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            ddgs = DDGS()
+            raw_results = list(ddgs.text(query, max_results=15))
+            break
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise ToolError(f"Search failed after {max_retries} attempts: {e}")
+            time.sleep(1.5 ** attempt)
 
     results = []
     seen_urls = set()
-    seen_domains = set()
+    domain_counts = {}
     
     for r in raw_results:
         href = r.get("href")
@@ -66,11 +71,11 @@ def _web_search(ctx: ToolContext, args: WebSearchArgs) -> dict[str, Any]:
         if href in seen_urls:
             continue
             
-        if domain in seen_domains:
+        if domain_counts.get(domain, 0) >= 2:
             continue
             
         seen_urls.add(href)
-        seen_domains.add(domain)
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
         
         parsed = urlparse(href)
         clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
@@ -78,11 +83,11 @@ def _web_search(ctx: ToolContext, args: WebSearchArgs) -> dict[str, Any]:
         results.append({
             "rank": len(results) + 1,
             "title": title[:200],
-            "snippet": snippet[:300].strip(),
+            "snippet": snippet[:600].strip(),
             "url": clean_url
         })
         
-        if len(results) >= 5:
+        if len(results) >= 7:
             break
 
     _web_cache[cache_key] = (results, now)
@@ -146,26 +151,77 @@ def _web_read(ctx: ToolContext, args: WebReadArgs) -> dict[str, Any]:
     text = res.text
     
     soup = BeautifulSoup(text, "html.parser")
-    for tag in soup(["script", "style", "noscript", "svg", "img"]):
+    
+    # Remove obvious noise
+    for tag in soup(["script", "style", "noscript", "svg", "img", "header", "footer", "nav", "aside"]):
         tag.decompose()
         
-    title = soup.title.string if soup.title else "No title"
-    content = soup.get_text(separator=" ", strip=True)
-    content = " ".join(content.split())
+    # Heuristic: Prefer common article body containers
+    main_content = None
+    for selector in ["article", "main", ".post-content", ".article-body", "#content", ".entry-content"]:
+        found = soup.select_one(selector)
+        if found and len(found.get_text()) > 300:
+            main_content = found
+            break
+            
+    if main_content:
+        # Extract structured text with headings preserved
+        lines = []
+        for tag in main_content.find_all(['h1', 'h2', 'h3', 'p', 'li']):
+            prefix = ""
+            if tag.name.startswith('h'):
+                prefix = "#" * int(tag.name[1:]) + " "
+            elif tag.name == 'li':
+                prefix = "- "
+            text_val = tag.get_text().strip()
+            if text_val:
+                lines.append(prefix + text_val)
+        content = "\n\n".join(lines)
+    else:
+        # Fallback to general text extraction
+        content = soup.get_text(separator="\n", strip=True)
+        content = "\n".join(line.strip() for line in content.splitlines() if line.strip())
     
+    title = soup.title.string if soup.title else "No title"
     if len(content) < 200:
         raise ToolError("Content too small or not useful")
         
-    content = content[:3000].strip()
+    content = content[:6000].strip()
     return {"url": url, "title": title.strip(), "content": content}
 
 class WebNewsArgs(BaseModel):
     query: str = Field(max_length=200)
 
 def _web_news(ctx: ToolContext, args: WebNewsArgs) -> dict[str, Any]:
-    with DDGS() as ddgs:
-        results = list(ddgs.news(args.query, max_results=5))
-    return {"results": results[:3]}
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with DDGS() as ddgs:
+                raw = list(ddgs.news(args.query, max_results=8))
+            break
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise ToolError(f"News search failed after {max_retries} attempts: {e}")
+            time.sleep(1.5 ** attempt)
+
+    results = []
+    seen_titles = set()
+    for item in raw:
+        title = (item.get("title") or "").strip()
+        if not title or title.lower() in seen_titles:
+            continue
+        seen_titles.add(title.lower())
+        results.append({
+            "headline": title,
+            "source": (item.get("source") or "Unknown").strip(),
+            "snippet": (item.get("body") or "")[:300].strip(),
+            "url": (item.get("url") or "").strip(),
+            "date": (item.get("date") or "").strip(),
+        })
+        if len(results) >= 5:
+            break
+
+    return {"query": args.query, "results": results}
 
 def build() -> list[Tool]:
     return [

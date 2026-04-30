@@ -1,5 +1,6 @@
 import time
 import subprocess
+import shlex
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
@@ -15,34 +16,31 @@ class OSVolumeArgs(BaseModel):
 def handle_os_volume(ctx: ToolContext, args: OSVolumeArgs) -> dict[str, Any]:
     level = args.level
     mute = args.mute
-    
+
     try:
-        from ctypes import cast, POINTER
-        from comtypes import CLSCTX_ALL
         from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
-        devices = AudioUtilities.GetSpeakers()
-        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        volume = cast(interface, POINTER(IAudioEndpointVolume))
-        
+        # Modern pycaw returns an AudioDevice object — use .EndpointVolume directly
+        device = AudioUtilities.GetSpeakers()
+        volume = device.EndpointVolume
+
         changes = []
         if mute is not None:
             volume.SetMute(1 if mute else 0, None)
             changes.append(f"Mute set to {mute}")
-            
+
         if level is not None:
             level = max(0, min(100, level))
-            scalar = level / 100.0
-            volume.SetMasterVolumeLevelScalar(scalar, None)
+            volume.SetMasterVolumeLevelScalar(level / 100.0, None)
             changes.append(f"Volume set to {level}%")
-            
+
         new_vol = int(volume.GetMasterVolumeLevelScalar() * 100)
         new_mute = bool(volume.GetMute())
-        
+
         return {
             "success": True,
-            "output": " ".join(changes) if changes else "No action taken",
-            "current_state": {"level": new_vol, "muted": new_mute}
+            "output": " | ".join(changes) if changes else "No changes made.",
+            "current_state": {"level": new_vol, "muted": new_mute},
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -112,7 +110,8 @@ class OSAppLaunchArgs(BaseModel):
 def handle_os_launch(ctx: ToolContext, args: OSAppLaunchArgs) -> dict[str, Any]:
     app_name = args.app_name
     try:
-        subprocess.Popen(f"start {app_name}", shell=True)
+        safe_app_name = shlex.quote(app_name)
+        subprocess.Popen(f"start {safe_app_name}", shell=True)
         return {"success": True, "app": app_name}
     except Exception as e:
         return {"success": False, "error": str(e)}

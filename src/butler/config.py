@@ -74,10 +74,15 @@ class ButlerConfig(BaseModel):
     stt_model: str = Field(default_factory=lambda: os.getenv("BUTLER_STT_MODEL", "small"))
     stt_language: str = Field(default_factory=lambda: os.getenv("BUTLER_STT_LANGUAGE", "en"))
     voice: str = Field(default_factory=lambda: os.getenv("BUTLER_VOICE", "en-IE-EmilyNeural"))
+    tts_provider: str = Field(default_factory=lambda: os.getenv("BUTLER_TTS_PROVIDER", "edge-tts"))
     model: str = Field(default_factory=lambda: os.getenv("BUTLER_MODEL", "mistral:7b-instruct"))
     chat_model: str = Field(default_factory=lambda: os.getenv("BUTLER_CHAT_MODEL", "gemma:2b"))
     fallback_models: list[str] = Field(default_factory=list)
+    nvidia_tts_reference_audio: str = Field(default_factory=lambda: os.getenv("BUTLER_NVIDIA_TTS_REFERENCE_AUDIO", ""))
+    rate: str = "+0%"
+    persona: str = "Executive"
     home_location: str = ""
+    user_name: str = "Boss"
     voice_prebuffer_seconds: float = Field(default_factory=lambda: float(os.getenv("BUTLER_VOICE_PREBUFFER_SECONDS", "0.75")))
     voice_silence_seconds: float = Field(default_factory=lambda: float(os.getenv("BUTLER_VOICE_SILENCE_SECONDS", "2.0")))
     voice_energy_threshold: float = Field(default_factory=lambda: float(os.getenv("BUTLER_VOICE_ENERGY_THRESHOLD", "0.01")))
@@ -116,6 +121,7 @@ class ButlerConfig(BaseModel):
 
     allowed_roots: list[str] = Field(default_factory=list)
     confirm_writes: bool = False
+    auto_approve_tools: list[str] = Field(default_factory=list)
 
     blocked_web_domains: list[str] = Field(
         default_factory=lambda: [
@@ -125,7 +131,7 @@ class ButlerConfig(BaseModel):
 
     max_file_bytes: int = 512_000
     tool_timeout_seconds: int = 10
-    max_tool_iterations: int = 3
+    max_tool_iterations: int = 6
 
 
 def load_config() -> ButlerConfig:

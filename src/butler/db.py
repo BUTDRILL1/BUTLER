@@ -114,7 +114,14 @@ class ButlerDB:
         ensure_dir(notes_dir())
         conn = _connect(db_path())
         _apply_migrations(conn)
-        return ButlerDB(conn=conn)
+        db = ButlerDB(conn=conn)
+        db.cleanup_old_conversations()
+        return db
+
+    def cleanup_old_conversations(self, max_age_days: int = 14) -> None:
+        cutoff = _now_ms() - (max_age_days * 24 * 3600 * 1000)
+        self.conn.execute("DELETE FROM conversations WHERE created_at_ms < ?", (cutoff,))
+        self.conn.commit()
 
     def new_conversation(self) -> str:
         cid = _uuid()
@@ -137,6 +144,7 @@ class ButlerDB:
             "INSERT INTO messages (id, conversation_id, role, content, created_at_ms) VALUES (?, ?, ?, ?, ?)",
             (_uuid(), conversation_id, role, content, _now_ms()),
         )
+        self.conn.commit()
 
     def list_messages(self, conversation_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         if limit is None:

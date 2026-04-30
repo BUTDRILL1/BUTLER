@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from butler.config import ButlerConfig
 from butler.db import ButlerDB
 from butler.sandbox import PathSandbox
 from butler.tools.base import Tool, ToolCallRecord, ToolContext, ToolError, now_ms
+
+if TYPE_CHECKING:
+    from butler.agent.memory import MemoryStore
 from butler.tools.impl import files as files_tools
 from butler.tools.impl import index as index_tools
 from butler.tools.impl import notes as notes_tools
@@ -25,6 +28,7 @@ class ToolRegistry:
     config: ButlerConfig
     db: ButlerDB
     sandbox: PathSandbox
+    memory: MemoryStore
     tools: dict[str, Tool]
     _cached_description: list[dict[str, Any]] = field(init=False, repr=False, compare=False)
 
@@ -46,7 +50,7 @@ class ToolRegistry:
         if tool_name not in self.tools:
             raise ToolError(f"Unknown tool: {tool_name}")
         tool = self.tools[tool_name]
-        ctx = ToolContext(config=self.config, db=self.db, sandbox=self.sandbox)
+        ctx = ToolContext(config=self.config, db=self.db, sandbox=self.sandbox, memory=self.memory)
 
         started = now_ms()
         status = "ok"
@@ -82,7 +86,7 @@ class ToolRegistry:
                 )
 
 
-def build_default_tool_registry(config: ButlerConfig, db: ButlerDB) -> ToolRegistry:
+def build_default_tool_registry(config: ButlerConfig, db: ButlerDB, memory: MemoryStore) -> ToolRegistry:
     sandbox = PathSandbox.from_strings(config.allowed_roots)
     tools: dict[str, Tool] = {}
 
@@ -106,4 +110,4 @@ def build_default_tool_registry(config: ButlerConfig, db: ButlerDB) -> ToolRegis
     for t in spotify_tools.build():
         add(t)
 
-    return ToolRegistry(config=config, db=db, sandbox=sandbox, tools=tools)
+    return ToolRegistry(config=config, db=db, sandbox=sandbox, memory=memory, tools=tools)

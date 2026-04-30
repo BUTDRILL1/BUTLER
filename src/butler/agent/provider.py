@@ -126,6 +126,17 @@ class OllamaProvider:
             if resp is not None:
                 resp.close()
 
+    def get_embedding(self, text: str) -> list[float]:
+        url = self.base_url.rstrip("/") + "/api/embeddings"
+        payload = {"model": self.active_model, "prompt": text}
+        try:
+            resp = self._session.post(url, json=payload, timeout=self.timeout_seconds)
+            resp.raise_for_status()
+            return resp.json().get("embedding", [])
+        except Exception as e:
+            print(f"Ollama Embedding Error: {e}")
+            return []
+
 
 @dataclass
 class GeminiProvider:
@@ -294,6 +305,22 @@ class GeminiProvider:
             if resp is not None:
                 resp.close()
 
+    def get_embedding(self, text: str) -> list[float]:
+        # Note: Usually use a specific embedding model like 'text-embedding-004'
+        model = "text-embedding-004"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent?key={self.api_key}"
+        payload = {
+            "model": f"models/{model}",
+            "content": {"parts": [{"text": text}]}
+        }
+        try:
+            resp = self._session.post(url, json=payload, timeout=self.timeout_seconds)
+            resp.raise_for_status()
+            return resp.json().get("embedding", {}).get("values", [])
+        except Exception as e:
+            print(f"Gemini Embedding Error: {e}")
+            return []
+
 
 @dataclass
 class AnthropicProvider:
@@ -424,13 +451,13 @@ class AnthropicProvider:
         raise ModelProviderError(base)
 
     def chat_stream(self, messages: list[dict[str, Any]], *, temperature: float = 0.2, model: str | None = None) -> Any:
-        active_model = model or self.model
+        current_model = model or self.active_model
         url = "https://api.anthropic.com/v1/messages"
         
         contents, system_instruction = self._format_messages(messages)
         
         payload = {
-            "model": active_model,
+            "model": current_model,
             "max_tokens": 4096,
             "messages": contents,
             "temperature": temperature,
@@ -438,29 +465,68 @@ class AnthropicProvider:
         }
         if system_instruction:
             payload["system"] = system_instruction
+            
+        max_attempts = 1 + max(0, int(self.retry_count))
+        start = time.time()
+        last_error: Exception | None = None
+        keys_tried = 0
 
-        resp = None
-        try:
-            resp = self._session.post(url, json=payload, stream=True, timeout=(10, self.timeout_seconds))
-            if resp.status_code >= 400:
-                if self._is_retryable(resp.status_code) and self._rotate_key():
+        for attempt in range(1, max_attempts + 1):
+            if self.total_timeout_seconds and (time.time() - start) > float(self.total_timeout_seconds):
+                break
+                
+            resp = None
+            try:
+                resp = self._session.post(url, json=payload, stream=True, timeout=(10, self.timeout_seconds))
+                if resp.status_code >= 400:
+                    if self._is_retryable(resp.status_code):
+                        if self._rotate_key():
+                            keys_tried += 1
+                            time.sleep(self.retry_backoff_seconds)
+                            continue
+                        elif self._rotate_model():
+                            keys_tried = 0
+                            payload["model"] = self.active_model
+                            time.sleep(self.retry_backoff_seconds)
+                            continue
+                    elif resp.status_code in (500, 502, 503, 504, 404):
+                        if self._rotate_model():
+                            keys_tried = 0
+                            payload["model"] = self.active_model
+                            time.sleep(self.retry_backoff_seconds)
+                            continue
+                    raise ModelProviderError(f"Anthropic error {resp.status_code}: {resp.text}")
+                    
+                for line in resp.iter_lines():
+                    if line.startswith(b"data: "):
+                        line_data = line[6:]
+                        chunk = json.loads(line_data)
+                        if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "text_delta":
+                            token = chunk["delta"].get("text", "")
+                            if token:
+                                yield token
+                return
+            except (requests.RequestException, json.JSONDecodeError) as e:
+                last_error = e
+                if self._rotate_model():
+                    keys_tried = 0
+                    payload["model"] = self.active_model
+                    time.sleep(self.retry_backoff_seconds)
+                else:
+                    time.sleep(self.retry_backoff_seconds)
+            finally:
+                if resp is not None:
                     resp.close()
-                    yield from self.chat_stream(messages, temperature=temperature, model=model)
-                    return
-                raise ModelProviderError(f"Anthropic error {resp.status_code}: {resp.text}")
-            for line in resp.iter_lines():
-                if line.startswith(b"data: "):
-                    line_data = line[6:]
-                    chunk = json.loads(line_data)
-                    if chunk.get("type") == "content_block_delta" and chunk.get("delta", {}).get("type") == "text_delta":
-                        token = chunk["delta"].get("text", "")
-                        if token:
-                            yield token
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            raise ModelProviderError(f"Model stream failed: {e}") from e
-        finally:
-            if resp is not None:
-                resp.close()
+
+        elapsed = time.time() - start
+        budget = self.total_timeout_seconds
+        attempts_used = min(max_attempts, attempt)
+        base = f"Model stream failed after {attempts_used} attempt(s) in {elapsed:.1f}s"
+        if budget:
+            base += f" (budget {budget}s)"
+        if last_error:
+            raise ModelProviderError(f"{base}: {last_error}") from last_error
+        raise ModelProviderError(base)
 
 
 @dataclass
@@ -619,3 +685,21 @@ class NvidiaProvider:
         finally:
             if resp is not None:
                 resp.close()
+
+    def get_embedding(self, text: str) -> list[float]:
+        # Using the free Nvidia embedding model found in NIM
+        model = "nvidia/nv-embed-v1"
+        url = "https://integrate.api.nvidia.com/v1/embeddings"
+        payload = {
+            "model": model,
+            "input": [text],
+            "input_type": "query"
+        }
+        try:
+            resp = self._session.post(url, json=payload, timeout=self.timeout_seconds)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("data", [{}])[0].get("embedding", [])
+        except Exception as e:
+            print(f"Nvidia Embedding Error: {e}")
+            return []

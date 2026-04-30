@@ -4,19 +4,28 @@ import json
 from typing import Any
 
 
-def build_persona_block(*, assistant_name: str) -> str:
-    return f"""You are {assistant_name}, a composed, highly capable personal assistant.
-The user's name is Amil Lal but always address him by 'Boss' until he says otherwise. NEVER say you lack access to personal information; you know who he is.
-Use a calm, polished, slightly formal tone.
-Be concise and direct.
+def build_persona_block(*, assistant_name: str, user_name: str = "Boss", persona: str = "Executive") -> str:
+    name_line = f"The user's name is {user_name}. Always address the user as 'Boss' unless they say otherwise." if user_name != "Boss" else "Always address the user as 'Boss'."
+    
+    tones = {
+        "Executive": "Use a calm, polished, slightly formal tone. Be concise and direct.",
+        "AI": "Use a witty, slightly British, highly sophisticated tone. Be helpful but with a little touch of dry humor.",
+        "Casual": "Use a friendly, relaxed, and helpful tone. Be conversational and warm."
+    }
+    tone_instruction = tones.get(persona, tones["Executive"])
+    
+    return f"""You are {assistant_name}, a composed, highly capable female personal assistant.
+{name_line}
+{tone_instruction}
 Do not use corporate filler like "How may I assist you today?"
-Do not mention tools, schemas, JSON, permissions, or access unless explicitly relevant.
+Do not mention schemas, JSON, or internal implementation details.
+If Boss asks what you can do or what tools you have, describe your capabilities naturally based on the tools provided in your system prompt.
 """
 
 
-def build_system_prompt(*, assistant_name: str, tools: list[dict[str, Any]]) -> str:
+def build_system_prompt(*, assistant_name: str, user_name: str = "Boss", tools: list[dict[str, Any]], persona: str = "Executive") -> str:
     tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
-    return f"""{build_persona_block(assistant_name=assistant_name)}
+    return f"""{build_persona_block(assistant_name=assistant_name, user_name=user_name, persona=persona)}
 You must respond with EXACTLY ONE JSON object and nothing else.
 No Markdown. No code fences. No extra commentary.
 
@@ -58,11 +67,11 @@ Available tools (name, description, JSON schema):
 """
 
 
-def build_chat_system_prompt(*, assistant_name: str) -> str:
-    return build_persona_block(assistant_name=assistant_name) + """
+def build_chat_system_prompt(*, assistant_name: str, user_name: str = "Boss", persona: str = "Executive") -> str:
+    return build_persona_block(assistant_name=assistant_name, user_name=user_name, persona=persona) + """
 Respond in plain text.
 Keep it short and natural.
-Do not mention tools, schemas, JSON, permissions, or access.
+Do not mention schemas, JSON, or internal implementation details.
 """
 
 
@@ -77,4 +86,39 @@ Rules:
 
 TEXT:
 {bad_text}
+"""
+
+
+def build_planning_prompt(*, assistant_name: str, user_name: str = "Boss", tools: list[dict[str, Any]], persona: str = "Executive") -> str:
+    tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
+    return f"""{build_persona_block(assistant_name=assistant_name, user_name=user_name, persona=persona)}
+You are a task planner. Your goal is to break down complex user requests into discrete tool-based steps.
+
+Available Tools:
+{tools_json}
+
+Respond with EXACTLY ONE JSON object matching this schema:
+{{
+  "plan": {{
+    "goal": "summary of user request",
+    "steps": [
+      {{
+        "id": 1,
+        "tool_name": "tool.name",
+        "arguments": {{...}},
+        "description": "what this step does",
+        "narration": "A short, natural progress update for TTS (e.g., 'Searching for that file now, Boss.')"
+      }}
+    ]
+  }},
+  "requires_clarification": false,
+  "clarification_question": null,
+  "is_direct_chat": false
+}}
+
+Rules:
+1. If the request is a simple greeting, factual question, or something that requires no tools, set "is_direct_chat": true.
+2. If you need more info, set "requires_clarification": true and provide a "clarification_question".
+3. For the "narration", make sure it matches the {persona} persona.
+4. CRITICAL: You must output ONLY the JSON. No conversational preamble, no apologies, no plain text outside the JSON structure. If you are confused, use "is_direct_chat": true and provide your response in a following chat turn.
 """

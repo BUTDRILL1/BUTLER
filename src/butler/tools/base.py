@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar, TYPE_CHECKING
 
 from pydantic import BaseModel, ValidationError
 
 from butler.config import ButlerConfig
 from butler.db import ButlerDB
 from butler.sandbox import PathSandbox
+
+if TYPE_CHECKING:
+    from butler.agent.memory import MemoryStore
 
 
 class ToolError(Exception):
@@ -23,6 +26,7 @@ class ToolContext:
     config: ButlerConfig
     db: ButlerDB
     sandbox: PathSandbox
+    memory: MemoryStore | None = None
 
 
 @dataclass(frozen=True)

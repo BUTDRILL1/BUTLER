@@ -12,12 +12,17 @@ from butler.agent.prompting import (
     build_chat_system_prompt,
     build_repair_prompt_format,
     build_system_prompt,
+    build_planning_prompt,
 )
+from butler.agent.plan import TaskPlan, PlanResult, TaskStep
+from butler.agent.watcher import WorkspaceWatcher
 from butler.agent.provider import AnthropicProvider, GeminiProvider, NvidiaProvider, OllamaProvider
 from butler.agent.schema import ClarifyAction, FinalAction, ToolCallAction
 from butler.config import ButlerConfig
 from butler.db import ButlerDB
 from butler.tools.registry import ToolRegistry
+from butler.agent.memory import MemoryStore
+from butler.paths import butler_home_dir
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +113,19 @@ def _needs_external_info(text: str) -> bool:
         "headline",
         "headlines",
         "breaking",
+        "weather",
+        "rain",
+        "temperature",
+        "forecast",
+        "hot",
+        "cold",
+        "distance",
+        "how far",
+        "kilometers",
+        "miles",
+        "what time",
+        "date",
+        "day",
     ]
     weak = [
         "who is",
@@ -134,7 +152,15 @@ def _select_tool(query: str) -> str:
     q = query.lower()
     if any(x in q for x in ["file", "document", "notes"]):
         return "files.search"
-    if any(x in q for x in ["latest", "news", "price", "release", "update"]):
+    if any(x in q for x in ["weather", "rain", "temperature", "forecast", "hot", "cold"]):
+        return "weather.current"
+    if any(x in q for x in ["distance", "how far", "kilometers", "miles"]):
+        return "system.distance"
+    if any(x in q for x in ["what time", "date", "day", "time is it"]):
+        return "system.now"
+    if any(x in q for x in ["news", "headlines", "breaking"]):
+        return "web.news"
+    if any(x in q for x in ["latest", "price", "release", "update"]):
         return "web.search"
     return "web.search"
 
@@ -159,6 +185,11 @@ def _looks_like_casual_chat(text: str) -> bool:
         "how's it going",
         "hows it going",
         "remember my name",
+        "yo",
+        "sup",
+        "good night",
+        "see ya",
+        "take care",
     )
     if any(phrase in t for phrase in casual_phrases):
         return True
@@ -229,14 +260,14 @@ def _clean_factual_search_query(text: str) -> str:
 def _get_fallback_error_message(e: Exception) -> str:
     error_str = str(e).lower()
     if "token" in error_str or "quota" in error_str or "exhaust" in error_str:
-        return "I guess I am done, Boss!"
+        return "I'm out of API tokens right now, Boss."
     if "503" in error_str or "429" in error_str or "too many" in error_str or "unavailable" in error_str or "overloaded" in error_str:
-        return "Sorry Boss! My brain rotted, try again."
+        return "I'm sorry Boss, but I'm having trouble connecting to my central servers right now. Please try again in a moment."
     if "401" in error_str or "403" in error_str or "api-key" in error_str or "authentication" in error_str or "unauthorized" in error_str:
-        return "Well Boss! seems like I'm grounded."
+        return "It seems my API key is invalid or I lack authorization, Boss."
     if "timeout" in error_str:
-        return "Took quite some time and yet I couldn't fetch that. Wanna try again, Boss?"
-    return "Sorry Boss! Didn't get you. Wanna go again?"
+        return "That request took too long and timed out, Boss. Should we try again?"
+    return f"I encountered an unexpected error, Boss. {e}"
 
 
 @dataclass
@@ -247,6 +278,10 @@ class AgentRuntime:
     provider: Any = None
     conversation_id: str | None = None
     confirm_tool: Callable[[str, dict[str, Any]], bool] | None = None
+    on_status_update: Callable[[str], None] | None = None
+    on_plan_review: Callable[[str], bool] | None = None
+    memory: MemoryStore | None = None
+    watcher: WorkspaceWatcher | None = field(init=False, default=None)
     _action_system_prompt: str = field(init=False, repr=False, compare=False, default="")
     _chat_system_prompt: str = field(init=False, repr=False, compare=False, default="")
     _has_chat_stream: bool = field(init=False, repr=False, compare=False, default=False)
@@ -289,15 +324,76 @@ class AgentRuntime:
                     retry_count=self.config.model_retry_count,
                     total_timeout_seconds=self.config.model_total_timeout_seconds,
                 )
+        
+        # Initialize Semantic Memory if not provided
+        if self.memory is None:
+            mem_db = butler_home_dir() / "memory.db"
+            self.memory = MemoryStore(str(mem_db), self.provider)
+
         self._action_system_prompt = build_system_prompt(
             assistant_name=self.config.assistant_name,
+            user_name=self.config.user_name,
             tools=self.tools.describe(),
+            persona=self.config.persona,
         )
-        self._chat_system_prompt = build_chat_system_prompt(assistant_name=self.config.assistant_name)
-        self._has_chat_stream = hasattr(self.provider, "chat_stream")
+        self._chat_system_prompt = build_chat_system_prompt(
+            assistant_name=self.config.assistant_name,
+            user_name=self.config.user_name,
+            persona=self.config.persona,
+        )
+        self._has_chat_stream = getattr(self.provider, "has_chat_stream", False)
+        self.watcher = WorkspaceWatcher(self)
         if self.conversation_id is None:
-            existing = self.db.get_last_conversation(max_age_hours=24)
+            existing = self.db.get_last_conversation()
             self.conversation_id = existing or self.db.new_conversation()
+
+    def start_watcher(self):
+        if self.watcher:
+            self.watcher.start()
+
+    def stop_watcher(self):
+        if self.watcher:
+            self.watcher.stop()
+
+    def _record_to_memory(self, role: str, content: str):
+        """Asynchronously index a message into semantic memory."""
+        import threading
+        def _task():
+            try:
+                self.memory.add(content, metadata={"role": role, "conversation_id": self.conversation_id})
+            except Exception as e:
+                logger.warning("failed to index message into memory: %s", e)
+        
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _generate_plan(self, user_text: str) -> PlanResult:
+        """Generate a multi-step task plan for complex requests."""
+        planning_prompt = build_planning_prompt(
+            assistant_name=self.config.assistant_name,
+            user_name=self.config.user_name,
+            tools=self.tools.describe(),
+            persona=self.config.persona
+        )
+        
+        messages = [
+            {"role": "system", "content": planning_prompt},
+            {"role": "user", "content": user_text}
+        ]
+        
+        try:
+            content = self.provider.chat(messages, temperature=0.0)
+            # Cleanup Markdown noise (e.g. ```json ... ```)
+            if "```" in content:
+                content = content.split("```")[1]
+                if content.startswith("json"):
+                    content = content[4:].strip()
+                content = content.strip()
+            
+            data = json.loads(content)
+            return PlanResult(**data)
+        except Exception as e:
+            logger.warning("planner_failed error=%s content=%s", e, content if 'content' in locals() else "N/A")
+            return PlanResult(is_direct_chat=True)
 
     def _chat_history_messages(self, limit: int = 3) -> list[dict[str, Any]]:
         assert self.conversation_id is not None
@@ -328,15 +424,17 @@ class AgentRuntime:
     def _chat_mode_reply(self, model: str, user_text: str) -> str:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self._chat_system_prompt}]
         messages.extend(self._chat_history_messages())
+        messages.append({"role": "user", "content": user_text})
         try:
             return self._provider_chat(messages, temperature=0.2, model=model)
         except Exception as e:  # noqa: BLE001
             logger.warning("chat_mode_failed model=%s error=%s", model, e)
             return _get_fallback_error_message(e)
 
-    def _chat_mode_reply_stream(self, model: str) -> Any:
+    def _chat_mode_reply_stream(self, model: str, user_text: str) -> Any:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self._chat_system_prompt}]
         messages.extend(self._chat_history_messages())
+        messages.append({"role": "user", "content": user_text})
         try:
             started = time.perf_counter()
             first_token = True
@@ -406,42 +504,64 @@ class AgentRuntime:
         assert self.conversation_id is not None
         turn_started = time.perf_counter()
         self.db.add_message(self.conversation_id, "user", user_text)
+        self._record_to_memory("user", user_text)
 
-        route, reason = _classify_turn(user_text)
-        self._log_turn_route(user_text, route, reason)
+        # 1. Planning Phase (Phase 6)
+        plan_res = self._generate_plan(user_text)
+        
+        if plan_res.requires_clarification:
+            yield plan_res.clarification_question
+            self.db.add_message(self.conversation_id, "assistant", plan_res.clarification_question)
+            return
 
-        if route == "CHAT":
+        if plan_res.is_direct_chat or not plan_res.plan:
+            # Traditional Chat Route
             full_response = ""
-            for token in self._chat_mode_reply_stream(self.config.chat_model):
+            for token in self._chat_mode_reply_stream(self.config.chat_model, user_text):
                 full_response += token
                 yield token
             self.db.add_message(self.conversation_id, "assistant", full_response)
-            logger.info(
-                "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=chat",
-                self.conversation_id,
-                route,
-                int((time.perf_counter() - turn_started) * 1000),
-            )
+            self._record_to_memory("assistant", full_response)
             return
 
-        # Pre-Emptive System Execution Variables
-        force_system_tool = False
-        tool_to_call = ""
-        search_query = user_text
-        if route == "FACTUAL_SEARCH":
-            force_system_tool = True
-            tool_to_call = _select_tool(user_text)
-            search_query = _clean_factual_search_query(user_text)
+        # 1.5 Plan Review (Safety Check)
+        if self.on_plan_review:
+            plan_summary = f"GOAL: {plan_res.plan.goal}\n\nSTEPS:\n"
+            for s in plan_res.plan.steps:
+                plan_summary += f"{s.id}. {s.description}\n   > {s.narration}\n"
+            
+            if not self.on_plan_review(plan_summary):
+                yield "Task plan canceled. How else can I help?"
+                return
 
-        # Action Mode: attempt tool use with strict JSON action contract.
-        tool_iterations = 0
-        web_calls_this_turn = 0
-        did_summarize_files_search = False
-        awaiting_files_search_summary = False
-        last_files_search_result: dict[str, Any] | None = None
+        # 2. Autonomous Execution Phase
+        results_context = []
+        for step in plan_res.plan.steps:
+            # Trigger Proactive TTS Status
+            if self.on_status_update:
+                self.on_status_update(step.narration)
+            
+            # Execute Tool
+            try:
+                res = self.tools.call(step.tool_name, step.arguments)
+                results_context.append(f"Step {step.id} ({step.description}) Result: {json.dumps(res, ensure_ascii=False)}")
+            except Exception as e:
+                results_context.append(f"Step {step.id} Failed: {e}")
+                break # Stop if a step fails
+
+        # 3. Final Summary Generation
+        summary_prompt = f"The user wanted: {user_text}\n\nTask Results:\n" + "\n".join(results_context)
+        summary_prompt += "\n\nProvide a final, natural response to the user based on these results."
         
-        did_summarize_web_search = False
-        awaiting_web_search_summary = False
+        full_response = ""
+        for token in self._chat_mode_reply_stream(self.config.chat_model, summary_prompt):
+            full_response += token
+            yield token
+        
+        self.db.add_message(self.conversation_id, "assistant", full_response)
+        self._record_to_memory("assistant", full_response)
+        return
+
         last_web_search_result: dict[str, Any] | None = None
 
         def fallback_files_search_summary() -> str:
@@ -468,9 +588,10 @@ class AgentRuntime:
             if not results:
                 return "No web search results found."
             lines: list[str] = ["Web Search Results:"]
-            for idx, item in enumerate(results[:3], start=1):
-                snippet = item.get("snippet") or item.get("url", "")
-                line = f"{item.get('title', '')} - {snippet}".strip()
+            for idx, item in enumerate(results[:5], start=1):
+                title = item.get("title") or item.get("headline", "No Title")
+                snippet = item.get("snippet") or item.get("body") or item.get("url", "")
+                line = f"{title} - {snippet}".strip()
                 lines.append(f"{idx}. {line}")
             return "\n".join(lines).strip()
 
@@ -515,6 +636,7 @@ class AgentRuntime:
                     full_response += token
                     yield token
                 self.db.add_message(self.conversation_id, "assistant", full_response)
+                self._record_to_memory("assistant", full_response)
                 logger.info(
                     "turn_complete conversation_id=%s route=%s duration_ms=%d outcome=factual_search_summary",
                     self.conversation_id,
@@ -800,12 +922,17 @@ class AgentRuntime:
                         continue
 
                 if tool.side_effect and self.config.confirm_writes:
-                    allowed = False
-                    if self.confirm_tool is not None:
-                        try:
-                            allowed = bool(self.confirm_tool(action.name, action.arguments))
-                        except Exception:
-                            allowed = False
+                    # Bypass confirmation if the tool is in the auto_approve_tools list
+                    if action.name in self.config.auto_approve_tools:
+                        allowed = True
+                    else:
+                        allowed = False
+                        if self.confirm_tool is not None:
+                            try:
+                                allowed = bool(self.confirm_tool(action.name, action.arguments))
+                            except Exception:
+                                allowed = False
+                                
                     if not allowed:
                         action_messages.append({"role": "assistant", "content": json.dumps(action.model_dump(), ensure_ascii=False)})
                         action_messages.append({"role": "user", "content": f"TOOL_DENIED {action.name}: user did not approve this action"})
