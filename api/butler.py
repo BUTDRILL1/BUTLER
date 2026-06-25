@@ -1,6 +1,12 @@
 from http.server import BaseHTTPRequestHandler
 import json
 import re
+import sys
+import os
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+import re
 
 from butler.config import load_config
 from butler.db import ButlerDB
