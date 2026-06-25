@@ -37,7 +37,21 @@ class handler(BaseHTTPRequestHandler):
 
             config = load_config()
             db = ButlerDB.open(config)
-            memory = MemoryStore(db)
+
+            from butler.agent.provider import AnthropicProvider, GeminiProvider, NvidiaProvider, OllamaProvider
+            if config.provider == "gemini":
+                prov = GeminiProvider(api_keys=config.gemini_api_keys, model=config.model)
+            elif config.provider == "claude":
+                prov = AnthropicProvider(api_keys=config.claude_api_keys, model=config.model)
+            elif config.provider == "nvidia":
+                prov = NvidiaProvider(api_keys=config.nvidia_api_keys, model=config.model)
+            else:
+                prov = OllamaProvider(base_url=config.ollama_url, model=config.model)
+
+            from butler.paths import butler_home_dir
+            mem_db = butler_home_dir() / "memory.db"
+            memory = MemoryStore(str(mem_db), prov)
+            
             tools = build_default_tool_registry(config, db, memory)
 
             # Retrieve conversation history
