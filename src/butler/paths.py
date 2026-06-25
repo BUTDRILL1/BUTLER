@@ -22,12 +22,13 @@ def butler_home_dir() -> Path:
         candidates.append((Path(app_data) / "BUTLER").resolve())
     candidates.append((Path.home() / ".butler").resolve())
     candidates.append((Path.cwd() / ".butler").resolve())
+    candidates.append((Path("/tmp") / ".butler").resolve())
 
     for p in candidates:
         try:
             p.mkdir(parents=True, exist_ok=True)
             return p
-        except PermissionError:
+        except (PermissionError, OSError):
             continue
 
     raise PermissionError(
