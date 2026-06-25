@@ -1,14 +1,15 @@
 {
   "version": 2,
+  "builds": [
+    {
+      "src": "api/**/*.py",
+      "use": "@vercel/python"
+    }
+  ],
   "routes": [
     {
       "src": "/(.*)",
       "dest": "api/butler.py"
     }
-  ],
-  "functions": {
-    "api/butler.py": {
-      "maxDuration": 60
-    }
-  }
+  ]
 }
