@@ -15,6 +15,15 @@ from butler.tools.registry import build_default_tool_registry
 from butler.agent.loop import AgentRuntime
 
 class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "status": "online",
+            "message": "BUTLER is online and listening. Please send POST requests with {\"query\": \"...\"} to interact."
+        }).encode('utf-8'))
+
     def do_POST(self):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
