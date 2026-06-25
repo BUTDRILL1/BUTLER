@@ -1,28 +1,22 @@
+import json
 import os
-import sys
-import threading
-from typing import Callable, Any
-from PySide6.QtCore import QRect
-from PySide6.QtCore import Qt, QUrl, QObject, Slot, Signal, QSize
-from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
-from PySide6.QtGui import QCursor
-from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import QWebEnginePage
+from typing import Callable
+
+from PySide6.QtCore import QObject, QTimer, Qt, QUrl, Signal, Slot
+from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWebEngineWidgets import QWebEngineView
+
 
 class ButlerAPI(QObject):
     """
     The Neural Bridge between Python and JavaScript.
     Methods marked with @Slot() are callable from index.html.
     """
-    # Signals for thread-safe UI updates
-    window_resize_requested = Signal(int, int)
-    chat_state_changed = Signal(bool)
-    text_state_changed = Signal(bool)
-    expand_state_changed = Signal(bool)
-    hit_regions_updated = Signal(str)
+
     drag_requested = Signal()
-    
+    hit_regions_changed = Signal(str)
+
     def __init__(self, on_mic, on_wake, on_text, on_live, on_minimize, on_kill):
         super().__init__()
         self.on_mic = on_mic
@@ -31,100 +25,100 @@ class ButlerAPI(QObject):
         self.on_live = on_live
         self.on_minimize = on_minimize
         self.on_kill = on_kill
+        self._debug_enabled = os.getenv("BUTLER_GUI_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+
+    def _debug(self, name: str, value=None) -> None:
+        if self._debug_enabled:
+            suffix = "" if value is None else f"={value!r}"
+            print(f"[BUTLER GUI] {name}{suffix}")
 
     @Slot()
     def on_mic_click(self):
+        self._debug("on_mic_click")
         self.on_mic()
 
     @Slot(bool)
     def on_wake_toggle(self, enabled):
+        self._debug("on_wake_toggle", enabled)
         self.on_wake(enabled)
 
     @Slot(str)
     def on_text_submit(self, text):
+        self._debug("on_text_submit", text)
         self.on_text(text)
 
     @Slot(bool)
     def on_live_toggle(self, enabled):
+        self._debug("on_live_toggle", enabled)
         self.on_live(enabled)
 
     @Slot(bool)
-    def on_chat_toggle(self, enabled):
-        self.chat_state_changed.emit(enabled)
-
-    @Slot(bool)
     def on_text_toggle(self, enabled):
-        self.text_state_changed.emit(enabled)
-
-    @Slot(bool)
-    def on_expand_toggle(self, expanded):
-        self.expand_state_changed.emit(expanded)
-
-    @Slot(str)
-    def sync_hit_regions(self, rects_json):
-        self.hit_regions_updated.emit(rects_json)
+        self._debug("on_text_toggle", enabled)
 
     @Slot()
     def start_drag(self):
+        self._debug("start_drag")
         self.drag_requested.emit()
 
     @Slot()
     def minimize(self):
+        self._debug("minimize")
         self.on_minimize()
 
     @Slot()
     def kill(self):
+        self._debug("kill")
         self.on_kill()
 
+    @Slot(str)
+    def update_hit_regions(self, payload):
+        self._debug("update_hit_regions", payload)
+        self.hit_regions_changed.emit(payload)
+
+
 class ButlerWidget(QMainWindow):
-    # Signals for thread-safe status/feed updates
     status_signal = Signal(str)
     feed_signal = Signal(str, str)
+    deferred_call_signal = Signal(int, object)
+    MIN_WIDTH = 460
+    MIN_HEIGHT = 132
+    DEFAULT_WIDTH = 560
+    DEFAULT_HEIGHT = 150
+    MAX_WIDTH = 900
+    MAX_HEIGHT = 260
 
     def __init__(
-        self, 
-        on_mic_click: Callable[[], None], 
+        self,
+        on_mic_click: Callable[[], None],
         on_wake_toggle: Callable[[bool], None],
         on_text_submit: Callable[[str], None] = None,
-        on_tool_confirm: Callable[[bool], None] = None,
-        on_persona_change: Callable[[str], None] = None,
-        on_plan_confirm: Callable[[bool], None] = None,
         on_live_toggle: Callable[[bool], None] = None,
-        initial_persona: str = "Executive"
     ):
         super().__init__()
-        
-        # 1. Windows Ghosting Setup (Transparency)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setStyleSheet("background: transparent;")
-        
-        # 2. State & Callbacks
+
         self.on_mic_click = on_mic_click
         self.on_wake_toggle = on_wake_toggle
         self.on_text_submit = on_text_submit
         self.on_live_toggle = on_live_toggle
-        self._expanded = False
-        self._chat_open = False
-        self._text_open = False
-        
-        # 3. The API Bridge
+
         self.api = ButlerAPI(
             on_mic=lambda: self.on_mic_click(),
             on_wake=lambda e: self.on_wake_toggle(e),
             on_text=lambda t: self.on_text_submit(t) if on_text_submit else None,
             on_live=lambda e: self.on_live_toggle(e) if on_live_toggle else None,
             on_minimize=self.minimize,
-            on_kill=self.close_app
+            on_kill=self.close_app,
         )
-        self.api.window_resize_requested.connect(self.resize_window)
-        self.api.chat_state_changed.connect(self._on_chat_toggle)
-        self.api.text_state_changed.connect(self._on_text_toggle)
-        self.api.expand_state_changed.connect(self._on_expand_toggle)
-        self.api.hit_regions_updated.connect(self._on_hit_regions)
         self.api.drag_requested.connect(self.start_system_move)
-        
-        # 4. Web Engine Setup
+        self.api.hit_regions_changed.connect(self._on_hit_regions_changed)
+        self._hit_regions = {}
+
         self.view = QWebEngineView(self)
         self.view.page().setBackgroundColor(Qt.transparent)
         self.view.setAttribute(Qt.WA_NoSystemBackground)
@@ -132,161 +126,153 @@ class ButlerWidget(QMainWindow):
         self.view.setStyleSheet("background: transparent; border: none; outline: none;")
         self.setContentsMargins(0, 0, 0, 0)
         self.view.setContentsMargins(0, 0, 0, 0)
-        
-        # Set up QWebChannel
+
         self.channel = QWebChannel()
         self.channel.registerObject("api", self.api)
         self.view.page().setWebChannel(self.channel)
-        
-        # Initialize hit regions
-        self._hit_rects = []
-        self._update_hit_regions_fallback(160)
 
-        # 5. Load Content
         base_path = os.path.dirname(os.path.abspath(__file__))
         html_path = os.path.join(base_path, "web_ui", "index.html")
         self.view.setUrl(QUrl.fromLocalFile(html_path))
-        
-        # 6. Layout — transparent click-through
+
         self.setCentralWidget(self.view)
-        
-        # 7. Position: center-right of screen
-        screen = QApplication.primaryScreen().geometry()
-        initial_w = 160
-        initial_h = 240
-        # Right edge 20px from screen right edge
-        self.setGeometry(screen.width() - initial_w - 20, (screen.height() - initial_h) // 2, initial_w, initial_h)
-        
-        # Connect signals
+
+        screen = QApplication.primaryScreen().availableGeometry()
+        initial_w = self.DEFAULT_WIDTH
+        initial_h = self.DEFAULT_HEIGHT
+        self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
+        self.setMaximumSize(self.MAX_WIDTH, self.MAX_HEIGHT)
+        self.setGeometry(
+            screen.width() - initial_w - 20,
+            (screen.height() - initial_h) // 2,
+            initial_w,
+            initial_h,
+        )
+
         self.status_signal.connect(self._do_set_status)
         self.feed_signal.connect(self._do_append_feed)
+        self.deferred_call_signal.connect(self._do_after)
 
     def nativeEvent(self, eventType, message):
-        """Per-pixel click-through: only interactive regions receive clicks."""
+        """Keep the widget interactive inside its window bounds."""
         import ctypes
         import ctypes.wintypes
+
         WM_NCHITTEST = 0x0084
         HTTRANSPARENT = -1
         HTCLIENT = 1
-        
-        if eventType == b'windows_generic_MSG':
+        HTBOTTOMRIGHT = 17
+
+        if eventType == b"windows_generic_MSG":
             msg = ctypes.wintypes.MSG.from_address(int(message))
             if msg.message == WM_NCHITTEST:
-                x = ctypes.c_int16(msg.lParam & 0xFFFF).value - self.x()
-                y = ctypes.c_int16((msg.lParam >> 16) & 0xFFFF).value - self.y()
-                for rect in self._hit_rects:
-                    if rect.contains(x, y):
-                        return True, HTCLIENT
+                raw_x = msg.lParam & 0xFFFF
+                raw_y = (msg.lParam >> 16) & 0xFFFF
+                if raw_x & 0x8000:
+                    raw_x -= 0x10000
+                if raw_y & 0x8000:
+                    raw_y -= 0x10000
+                
+                scale = self.devicePixelRatioF() or 1.0
+                x = int(round(raw_x / scale)) - self.x()
+                y = int(round(raw_y / scale)) - self.y()
+
+                if 0 <= x < self.width() and 0 <= y < self.height():
+                    if self._point_in_region("resize", x, y):
+                        return True, HTBOTTOMRIGHT
+                    # All other clicks inside the window go to WebEngine.
+                    # Button actions (mic, live, text, wake, kill, minimize)
+                    # are handled by JS onclick -> QWebChannel slots.
+                    return True, HTCLIENT
+                # Outside the window bounds - click passes through to desktop
                 return True, HTTRANSPARENT
         return super().nativeEvent(eventType, message)
 
-    def _on_expand_toggle(self, expanded):
-        self._expanded = expanded
-        self._update_window_size()
-
-    def _on_chat_toggle(self, chat_open):
-        self._chat_open = chat_open
-        self._update_window_size()
-
-    def _on_text_toggle(self, text_open):
-        self._text_open = text_open
-        self._update_window_size()
-
-    def _update_window_size(self):
-        w = 160
-        h = 240
-        
-        if self._expanded:
-            w = max(w, 280)
-            h = max(h, 340)
-            
-        if self._text_open:
-            w = max(w, 400)
-            h = max(h, 380)
-            
-        if self._chat_open:
-            w = max(w, 520)
-            h = max(h, 440)
-            
-        geom = self.geometry()
-        top_right_x = geom.x() + geom.width()
-        top_y = geom.y()
-        self.setFixedSize(w, h)
-        self.move(top_right_x - w, top_y)
-        # Fallback hit rect update just in case JS is slow
-        self._update_hit_regions_fallback(w)
-
-    def _on_hit_regions(self, rects_json):
-        """Receive actual element bounding rects from JS — the only source of truth."""
-        import json
+    def _on_hit_regions_changed(self, payload: str):
         try:
-            rects = json.loads(rects_json)
-            self._hit_rects = [
-                QRect(int(r['x']), int(r['y']), int(r['w']), int(r['h']))
-                for r in rects
-            ]
-        except Exception:
-            pass
+            data = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            return
 
-    def _update_hit_regions_fallback(self, w):
-        """Fallback hit region for startup before JS reports."""
-        hub_cx = w - 80
-        hub_cy = 160
-        self._hit_rects = [QRect(hub_cx - 50, hub_cy - 50, 140, 110)]
+        regions = {}
+        for name in ("dock", "drag", "resize"):
+            rect = data.get(name)
+            if not isinstance(rect, dict):
+                continue
+            try:
+                regions[name] = {
+                    "x": float(rect["x"]),
+                    "y": float(rect["y"]),
+                    "w": float(rect["w"]),
+                    "h": float(rect["h"]),
+                }
+            except (KeyError, TypeError, ValueError):
+                continue
+        self._hit_regions = regions
 
-    def _trigger_drag(self):
-        pass
-
-    def resize_window(self, w, h):
-        self.setFixedSize(w, h)
+    def _point_in_region(self, name: str, x: int, y: int) -> bool:
+        rect = self._hit_regions.get(name)
+        if not rect:
+            return False
+        return (
+            rect["x"] <= x <= rect["x"] + rect["w"]
+            and rect["y"] <= y <= rect["y"] + rect["h"]
+        )
 
     def minimize(self):
         self.showMinimized()
 
     def close_app(self):
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+            return
         self.close()
-        os._exit(0)
 
     def closeEvent(self, event):
-        self.close_app()
         event.accept()
+        app = QApplication.instance()
+        if app is not None:
+            QTimer.singleShot(0, app.quit)
 
     def start_system_move(self):
         """Bulletproof Windows native drag via Win32 API."""
         import ctypes
+
         hwnd = int(self.winId())
         ctypes.windll.user32.ReleaseCapture()
         ctypes.windll.user32.SendMessageW(hwnd, 0x00A1, 2, 0)
 
-    # Thread-safe methods
     def set_status(self, status: str):
         self.status_signal.emit(status)
 
     def _do_set_status(self, status: str):
-        safe_status = status.replace("'", "\\'")
-        self.view.page().runJavaScript(f"window.updateStatus('{safe_status}')")
+        self.view.page().runJavaScript(f"window.updateStatus({json.dumps(status)})")
 
     def append_feed(self, role: str, text: str):
         self.feed_signal.emit(role, text)
 
     def _do_append_feed(self, role: str, text: str):
-        safe_text = text.replace("'", "\\'").replace("\n", " ")
         role_map = {"Heard": "user", "You": "user", "Butler": "butler"}
         js_role = role_map.get(role, role.lower())
-        self.view.page().runJavaScript(f"window.appendLog('{js_role}', '{safe_text}')")
+        self.view.page().runJavaScript(
+            f"window.appendLog({json.dumps(js_role)}, {json.dumps(text)})"
+        )
 
     def show_tool_confirmation(self, text: str):
-        self.view.page().runJavaScript(f"console.log('Tool Confirmation: {text}')")
+        self.view.page().runJavaScript(f"console.log({json.dumps(f'Tool Confirmation: {text}')})")
 
     def show_plan_review(self, text: str):
-        self.view.page().runJavaScript(f"console.log('Plan Review: {text}')")
+        self.view.page().runJavaScript(f"console.log({json.dumps(f'Plan Review: {text}')})")
 
-    # Compatibility methods
     def after(self, ms, func):
-        threading.Timer(ms/1000.0, func).start()
+        self.deferred_call_signal.emit(int(ms), func)
+
+    def _do_after(self, ms, func):
+        QTimer.singleShot(max(0, int(ms)), func)
 
     def update(self):
         pass
-    
+
     def mainloop(self):
         pass

@@ -5,8 +5,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import logging
 import requests
 
+logger = logging.getLogger(__name__)
 
 class ModelProviderError(Exception):
     pass
@@ -134,7 +136,7 @@ class OllamaProvider:
             resp.raise_for_status()
             return resp.json().get("embedding", [])
         except Exception as e:
-            print(f"Ollama Embedding Error: {e}")
+            logger.error(f"Ollama Embedding Error: {e}", exc_info=True)
             return []
 
 
@@ -533,6 +535,7 @@ class AnthropicProvider:
 class NvidiaProvider:
     api_keys: list[Any]
     model: str = "mistralai/mistral-nemotron"
+    embedding_model: str = "nvidia/nv-embed-v1"
     timeout_seconds: int = 60
     retry_count: int = 0
     total_timeout_seconds: int = 0
@@ -687,8 +690,8 @@ class NvidiaProvider:
                 resp.close()
 
     def get_embedding(self, text: str) -> list[float]:
-        # Using the free Nvidia embedding model found in NIM
-        model = "nvidia/nv-embed-v1"
+        # Using the configured Nvidia embedding model
+        model = self.embedding_model
         url = "https://integrate.api.nvidia.com/v1/embeddings"
         payload = {
             "model": model,

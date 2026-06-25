@@ -49,6 +49,74 @@ class ReadTextArgs(BaseModel):
     path: str
 
 
+def _read_pdf(p: Path) -> str:
+    from pypdf import PdfReader
+    reader = PdfReader(str(p))
+    pages: list[str] = []
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        if text.strip():
+            pages.append(f"--- Page {i+1} ---\n{text.strip()}")
+    return "\n\n".join(pages) if pages else "(No extractable text found in this PDF)"
+
+
+def _read_docx(p: Path) -> str:
+    from docx import Document
+    doc = Document(str(p))
+    paragraphs = [para.text for para in doc.paragraphs if para.text.strip()]
+    return "\n".join(paragraphs) if paragraphs else "(No text found in this Word document)"
+
+
+def _read_xlsx(p: Path) -> str:
+    from openpyxl import load_workbook
+    wb = load_workbook(str(p), read_only=True, data_only=True)
+    sheets: list[str] = []
+    for name in wb.sheetnames:
+        ws = wb[name]
+        rows: list[str] = []
+        for row in ws.iter_rows(values_only=True):
+            cells = [str(c) if c is not None else "" for c in row]
+            if any(cells):
+                rows.append(" | ".join(cells))
+        if rows:
+            sheets.append(f"--- Sheet: {name} ---\n" + "\n".join(rows))
+    wb.close()
+    return "\n\n".join(sheets) if sheets else "(No data found in this Excel file)"
+
+
+def _read_pptx(p: Path) -> str:
+    from pptx import Presentation
+    prs = Presentation(str(p))
+    slides: list[str] = []
+    for i, slide in enumerate(prs.slides):
+        texts: list[str] = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    if para.text.strip():
+                        texts.append(para.text.strip())
+        if texts:
+            slides.append(f"--- Slide {i+1} ---\n" + "\n".join(texts))
+    return "\n\n".join(slides) if slides else "(No text found in this PowerPoint)"
+
+
+def _read_csv(p: Path) -> str:
+    import csv
+    with open(p, newline="", encoding="utf-8", errors="replace") as f:
+        reader = csv.reader(f)
+        rows = [" | ".join(row) for row in reader]
+    return "\n".join(rows[:500]) if rows else "(Empty CSV file)"
+
+
+_FORMAT_READERS: dict[str, Any] = {
+    ".pdf": _read_pdf,
+    ".docx": _read_docx,
+    ".xlsx": _read_xlsx,
+    ".pptx": _read_pptx,
+    ".csv": _read_csv,
+}
+
+
 def _read_text(ctx: ToolContext, args: ReadTextArgs) -> dict[str, Any]:
     if not ctx.sandbox.allowed_roots:
         raise ToolError("No allowed roots configured. Add one with /roots add <path>.")
@@ -58,6 +126,16 @@ def _read_text(ctx: ToolContext, args: ReadTextArgs) -> dict[str, Any]:
     size = p.stat().st_size
     if size > ctx.config.max_file_bytes:
         raise ToolError(f"File too large ({size} bytes). Limit is {ctx.config.max_file_bytes}.")
+
+    ext = p.suffix.lower()
+    reader_fn = _FORMAT_READERS.get(ext)
+    if reader_fn:
+        try:
+            content = reader_fn(p)
+            return {"path": str(p), "size_bytes": size, "format": ext, "content": content}
+        except Exception as e:
+            return {"path": str(p), "size_bytes": size, "format": ext, "error": f"Failed to read {ext} file: {e}"}
+
     content = p.read_text(encoding="utf-8", errors="replace")
     return {"path": str(p), "size_bytes": size, "content": content}
 
@@ -92,22 +170,40 @@ def _files_search(ctx: ToolContext, args: SearchArgs) -> dict[str, Any]:
     limit = max(1, min(int(args.limit), 10))
     query = args.query.strip()
     
-    # 1. Semantic Search (Phase 5 Upgrade)
+    # 1. Path / Filename Search (most common use-case)
+    path_results = []
+    try:
+        rows = ctx.db.conn.execute(
+            "SELECT path FROM files_fts WHERE path LIKE ? LIMIT ?",
+            (f"%{query}%", limit),
+        ).fetchall()
+        for r in rows:
+            path_results.append({
+                "path": r["path"],
+                "score": 2.0,
+                "snippet": f"Filename match: {r['path']}",
+                "method": "filename"
+            })
+    except sqlite3.OperationalError:
+        pass
+
+    # 2. Semantic Search (Phase 5 Upgrade)
     semantic_results = []
     try:
-        mem_hits = ctx.runtime.memory.search(query, limit=limit)
-        for hit in mem_hits:
-            if hit["metadata"].get("type") == "file":
-                semantic_results.append({
-                    "path": hit["metadata"]["path"],
-                    "score": hit["score"],
-                    "snippet": _clean_snippet(_truncate(hit["content"], 200)),
-                    "method": "semantic"
-                })
+        if ctx.memory:
+            mem_hits = ctx.memory.search(query, limit=limit)
+            for hit in mem_hits:
+                if hit["metadata"].get("type") == "file":
+                    semantic_results.append({
+                        "path": hit["metadata"]["path"],
+                        "score": hit["score"],
+                        "snippet": _clean_snippet(_truncate(hit["content"], 200)),
+                        "method": "semantic"
+                    })
     except Exception as e:
         print(f"Semantic Search Warning: {e}")
 
-    # 2. Traditional FTS Search
+    # 3. Traditional FTS Content Search
     fts_results = []
     try:
         rows = ctx.db.conn.execute(
@@ -120,15 +216,15 @@ def _files_search(ctx: ToolContext, args: SearchArgs) -> dict[str, Any]:
         for r in rows:
             fts_results.append({
                 "path": r["path"],
-                "score": 1.0, # Baseline for match
+                "score": 1.0,
                 "snippet": _clean_snippet(_truncate(r["snippet"] or "", 200)),
                 "method": "keyword"
             })
     except sqlite3.OperationalError:
-        pass # Index might be empty or query invalid for FTS
+        pass
 
-    # 3. Merge and Deduplicate
-    all_results = semantic_results + fts_results
+    # 4. Merge and Deduplicate (path matches first)
+    all_results = path_results + semantic_results + fts_results
     seen_paths = set()
     final_results = []
     for res in all_results:

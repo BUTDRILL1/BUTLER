@@ -1,98 +1,14 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+
+from supabase import create_client, Client
 
 from butler.config import ButlerConfig
-from butler.paths import db_path, ensure_dir, notes_dir
-
-
-SCHEMA_VERSION = 2
-
-
-def _connect(path: Path) -> sqlite3.Connection:
-    ensure_dir(path.parent)
-    conn = sqlite3.connect(str(path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    conn.execute("PRAGMA cache_size = -32000;")
-    conn.execute("PRAGMA mmap_size = 268435456;")
-    conn.execute("PRAGMA temp_store = MEMORY;")
-    return conn
-
-
-def _apply_migrations(conn: sqlite3.Connection) -> None:
-    current = conn.execute("PRAGMA user_version;").fetchone()[0]
-    if current >= SCHEMA_VERSION:
-        return
-
-    if current < 1:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS conversations (
-              id TEXT PRIMARY KEY,
-              created_at_ms INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS messages (
-              id TEXT PRIMARY KEY,
-              conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-              role TEXT NOT NULL,
-              content TEXT NOT NULL,
-              created_at_ms INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS tool_calls (
-              id TEXT PRIMARY KEY,
-              conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-              tool_name TEXT NOT NULL,
-              args_json TEXT NOT NULL,
-              result_json TEXT,
-              status TEXT NOT NULL,
-              error TEXT,
-              started_at_ms INTEGER NOT NULL,
-              duration_ms INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS notes (
-              id TEXT PRIMARY KEY,
-              title TEXT NOT NULL UNIQUE,
-              path TEXT NOT NULL UNIQUE,
-              created_at_ms INTEGER NOT NULL,
-              updated_at_ms INTEGER NOT NULL
-            );
-            CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(title, content, path);
-            CREATE TABLE IF NOT EXISTS roots (
-              path TEXT PRIMARY KEY,
-              created_at_ms INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS indexed_files (
-              path TEXT PRIMARY KEY,
-              size_bytes INTEGER NOT NULL,
-              mtime_ms INTEGER NOT NULL,
-              indexed_at_ms INTEGER NOT NULL
-            );
-            CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(path, content);
-            """
-        )
-        conn.execute("PRAGMA user_version = 1;")
-
-    if current < 2:
-        conn.executescript(
-            """
-            CREATE INDEX IF NOT EXISTS idx_messages_conversation_created_at
-              ON messages(conversation_id, created_at_ms);
-            CREATE INDEX IF NOT EXISTS idx_conversations_created_at_desc
-              ON conversations(created_at_ms DESC);
-            """
-        )
-        conn.execute("PRAGMA user_version = 2;")
-
-    conn.commit()
 
 
 def _now_ms() -> int:
@@ -105,60 +21,75 @@ def _uuid() -> str:
 
 @dataclass
 class ButlerDB:
-    conn: sqlite3.Connection
+    client: Client
 
     @staticmethod
     def open(config: ButlerConfig) -> "ButlerDB":
-        # Ensure home folders exist as a side effect.
-        ensure_dir(db_path().parent)
-        ensure_dir(notes_dir())
-        conn = _connect(db_path())
-        _apply_migrations(conn)
-        db = ButlerDB(conn=conn)
+        url: str = config.supabase_url
+        key: str = config.supabase_key
+        
+        if not url or not key:
+            raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in the config/.env")
+            
+        client = create_client(url, key)
+        db = ButlerDB(client=client)
         db.cleanup_old_conversations()
         return db
 
     def cleanup_old_conversations(self, max_age_days: int = 14) -> None:
         cutoff = _now_ms() - (max_age_days * 24 * 3600 * 1000)
-        self.conn.execute("DELETE FROM conversations WHERE created_at_ms < ?", (cutoff,))
-        self.conn.commit()
+        self.client.table("conversations").delete().lt("created_at_ms", cutoff).execute()
 
     def new_conversation(self) -> str:
         cid = _uuid()
-        self.conn.execute(
-            "INSERT INTO conversations (id, created_at_ms) VALUES (?, ?)",
-            (cid, _now_ms()),
-        )
+        self.client.table("conversations").insert({
+            "id": cid, 
+            "created_at_ms": _now_ms()
+        }).execute()
         return cid
 
     def get_last_conversation(self, max_age_hours: int = 24) -> str | None:
         cutoff = _now_ms() - (max_age_hours * 3600 * 1000)
-        row = self.conn.execute(
-            "SELECT id FROM conversations WHERE created_at_ms > ? ORDER BY created_at_ms DESC LIMIT 1",
-            (cutoff,)
-        ).fetchone()
-        return row["id"] if row else None
+        res = self.client.table("conversations") \
+            .select("id") \
+            .gt("created_at_ms", cutoff) \
+            .order("created_at_ms", desc=True) \
+            .limit(1) \
+            .execute()
+        return res.data[0]["id"] if res.data else None
 
     def add_message(self, conversation_id: str, role: str, content: str) -> None:
-        self.conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, created_at_ms) VALUES (?, ?, ?, ?, ?)",
-            (_uuid(), conversation_id, role, content, _now_ms()),
-        )
-        self.conn.commit()
+        self.client.table("messages").insert({
+            "id": _uuid(),
+            "conversation_id": conversation_id,
+            "role": role,
+            "content": content,
+            "created_at_ms": _now_ms()
+        }).execute()
 
     def list_messages(self, conversation_id: str, limit: int | None = None) -> list[dict[str, Any]]:
-        if limit is None:
-            rows = self.conn.execute(
-                "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY created_at_ms ASC",
-                (conversation_id,),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY created_at_ms DESC LIMIT ?",
-                (conversation_id, limit),
-            ).fetchall()
-            rows = list(reversed(rows))
-        return [{"role": r["role"], "content": r["content"]} for r in rows]
+        query = self.client.table("messages") \
+            .select("role, content") \
+            .eq("conversation_id", conversation_id) \
+            .order("created_at_ms", desc=False)
+        
+        if limit:
+            # We want the LAST `limit` messages in ascending order.
+            # Supabase doesn't easily let us order desc, limit, then reverse in one query.
+            # So we'll fetch them desc, then reverse in Python.
+            query = self.client.table("messages") \
+                .select("role, content") \
+                .eq("conversation_id", conversation_id) \
+                .order("created_at_ms", desc=True) \
+                .limit(limit)
+            res = query.execute()
+            return [{"role": r["role"], "content": r["content"]} for r in reversed(res.data)]
+
+        res = query.execute()
+        return [{"role": r["role"], "content": r["content"]} for r in res.data]
+
+    def clear_conversation(self, conversation_id: str) -> None:
+        self.client.table("messages").delete().eq("conversation_id", conversation_id).execute()
 
     def log_tool_call(
         self,
@@ -172,24 +103,97 @@ class ButlerDB:
         started_at_ms: int,
         duration_ms: int,
     ) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO tool_calls
-              (id, conversation_id, tool_name, args_json, result_json, status, error, started_at_ms, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                _uuid(),
-                conversation_id,
-                tool_name,
-                json.dumps(args, ensure_ascii=False),
-                json.dumps(result, ensure_ascii=False) if result is not None else None,
-                status,
-                error,
-                started_at_ms,
-                duration_ms,
-            ),
-        )
+        self.client.table("tool_calls").insert({
+            "id": _uuid(),
+            "conversation_id": conversation_id,
+            "tool_name": tool_name,
+            "args_json": json.dumps(args, ensure_ascii=False),
+            "result_json": json.dumps(result, ensure_ascii=False) if result is not None else None,
+            "status": status,
+            "error": error,
+            "started_at_ms": started_at_ms,
+            "duration_ms": duration_ms
+        }).execute()
 
     def flush_turn(self) -> None:
-        self.conn.commit()
+        pass  # Supabase inserts are atomic and immediately executed.
+
+    # --- Reminders API ---
+
+    def create_reminder(self, message: str, trigger_time_ms: int, recurrence_minutes: float | None = None) -> str:
+        rid = _uuid()
+        self.client.table("reminders").insert({
+            "id": rid,
+            "message": message,
+            "trigger_time_ms": trigger_time_ms,
+            "recurrence_minutes": recurrence_minutes,
+            "is_sent": 0,
+            "created_at_ms": _now_ms()
+        }).execute()
+        return rid
+
+    def get_pending_reminders(self) -> list[dict[str, Any]]:
+        now = _now_ms()
+        res = self.client.table("reminders") \
+            .select("id, message, trigger_time_ms, recurrence_minutes") \
+            .eq("is_sent", 0) \
+            .lte("trigger_time_ms", now) \
+            .order("trigger_time_ms", desc=False) \
+            .execute()
+        return res.data
+
+    def mark_reminder_sent(self, reminder_id: str) -> None:
+        self.client.table("reminders").update({"is_sent": 1}).eq("id", reminder_id).execute()
+
+    def snooze_reminder(self, reminder_id: str, added_time_ms: int) -> None:
+        # We must fetch the current trigger_time_ms, then update it.
+        res = self.client.table("reminders").select("trigger_time_ms").eq("id", reminder_id).execute()
+        if res.data:
+            current_ms = res.data[0]["trigger_time_ms"]
+            self.client.table("reminders").update({
+                "is_sent": 0, 
+                "trigger_time_ms": current_ms + added_time_ms
+            }).eq("id", reminder_id).execute()
+
+    def reschedule_recurring_reminder(self, reminder_id: str, recurrence_minutes: float) -> None:
+        added_ms = int(recurrence_minutes * 60 * 1000)
+        res = self.client.table("reminders").select("trigger_time_ms").eq("id", reminder_id).execute()
+        if res.data:
+            current_ms = res.data[0]["trigger_time_ms"]
+            self.client.table("reminders").update({
+                "trigger_time_ms": current_ms + added_ms
+            }).eq("id", reminder_id).execute()
+
+    def list_all_pending_reminders(self) -> list[dict[str, Any]]:
+        res = self.client.table("reminders") \
+            .select("id, message, trigger_time_ms, recurrence_minutes") \
+            .eq("is_sent", 0) \
+            .order("trigger_time_ms", desc=False) \
+            .execute()
+        return res.data
+
+    def delete_reminder(self, reminder_id: str) -> bool:
+        res = self.client.table("reminders").delete().eq("id", reminder_id).execute()
+        return len(res.data) > 0 if res.data else False
+
+    def clear_reminders(self) -> int:
+        res = self.client.table("reminders").delete().eq("is_sent", 0).execute()
+        return len(res.data) if res.data else 0
+
+    # ── Custom Skills ──────────────────────────────────────────────────
+
+    def add_skill(self, trigger: str, action: str) -> None:
+        self.client.table("skills").upsert({
+            "id": _uuid(),
+            "trigger": trigger,
+            "action": action,
+            "created_at_ms": _now_ms()
+        }, on_conflict="trigger").execute()
+
+    def list_skills(self) -> list[dict[str, Any]]:
+        res = self.client.table("skills").select("id, trigger, action").order("created_at_ms", desc=True).execute()
+        return res.data
+
+    def delete_skill(self, skill_id: str) -> bool:
+        res = self.client.table("skills").delete().eq("id", skill_id).execute()
+        return len(res.data) > 0 if res.data else False

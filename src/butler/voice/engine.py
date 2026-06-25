@@ -5,8 +5,11 @@ import time
 import queue
 import tempfile
 from collections import deque
+import logging
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 import pyaudio
 import pygame
@@ -331,7 +334,7 @@ class VoiceEngine:
                 
             return out_path
         except Exception as e:
-            print(f"Google TTS Fallback Failed: {e}")
+            logger.error(f"Google TTS Fallback Failed: {e}", exc_info=True)
             return None
 
     def _fetch_audio_freetts(self, text: str) -> str | None:
@@ -354,19 +357,19 @@ class VoiceEngine:
             }
             res_tts = requests.post(url_tts, json=payload, headers=headers, timeout=15)
             if res_tts.status_code != 200:
-                print(f"FreeTTS Request Error: {res_tts.status_code}")
+                logger.error(f"FreeTTS Request Error: {res_tts.status_code}")
                 return None
             
             file_id = res_tts.json().get("file_id")
             if not file_id:
-                print("FreeTTS Error: No file_id returned")
+                logger.error("FreeTTS Error: No file_id returned")
                 return None
                 
             # Step 2: Download the audio
             url_audio = f"https://freetts.org/api/audio/{file_id}"
             res_audio = requests.get(url_audio, headers={"User-Agent": headers["User-Agent"]}, timeout=15)
             if res_audio.status_code != 200:
-                print(f"FreeTTS Download Error: {res_audio.status_code}")
+                logger.error(f"FreeTTS Download Error: {res_audio.status_code}")
                 return None
                 
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
@@ -375,7 +378,7 @@ class VoiceEngine:
                     f.write(res_audio.content)
                 return tmp_path
         except Exception as e:
-            print(f"FreeTTS Fetch Failed: {e}")
+            logger.error(f"FreeTTS Fetch Failed: {e}", exc_info=True)
             return None
 
     def _fetch_audio_edge(self, text: str) -> str | None:
@@ -402,7 +405,7 @@ class VoiceEngine:
                 else:
                     raise ValueError("Empty audio file received")
             except Exception as e:
-                print(f"Edge TTS Attempt {attempt+1} Failed: {e}")
+                logger.warning(f"Edge TTS Attempt {attempt+1} Failed: {e}")
                 time.sleep(1.0) # Longer pause between retries
         
         return tmp_path if success else None
@@ -452,10 +455,10 @@ class VoiceEngine:
                     wf.writeframes(response.audio)
                 return tmp_path
             else:
-                print(f"Nvidia TTS Error: Empty response from Riva.")
+                logger.error("Nvidia TTS Error: Empty response from Riva.")
                 return None
         except Exception as e:
-            print(f"Nvidia Riva TTS Fetch Failed: {e}")
+            logger.error(f"Nvidia Riva TTS Fetch Failed: {e}", exc_info=True)
             return None
 
     def _play_audio_file(self, path: str, actual_provider: str = ""):
@@ -498,7 +501,7 @@ class VoiceEngine:
                 self.trigger_manual_listen()
 
         except Exception as e:
-            print(f"Audio Playback Error: {e}")
+            logger.error(f"Audio Playback Error: {e}", exc_info=True)
         finally:
             self.status_callback("Ready")
             if os.path.exists(path):

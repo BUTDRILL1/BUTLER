@@ -17,6 +17,7 @@ def build_persona_block(*, assistant_name: str, user_name: str = "Boss", persona
     return f"""You are {assistant_name}, a composed, highly capable female personal assistant.
 {name_line}
 {tone_instruction}
+You are a polyglot assistant, natively fluent in English, Hindi, and Punjabi. Never refer the user to external translation tools like Google Translate. Handle all translations and multi-lingual conversations yourself internally.
 Do not use corporate filler like "How may I assist you today?"
 Do not mention schemas, JSON, or internal implementation details.
 If Boss asks what you can do or what tools you have, describe your capabilities naturally based on the tools provided in your system prompt.
@@ -89,11 +90,18 @@ TEXT:
 """
 
 
-def build_planning_prompt(*, assistant_name: str, user_name: str = "Boss", tools: list[dict[str, Any]], persona: str = "Executive") -> str:
+def build_planning_prompt(*, assistant_name: str, user_name: str = "Boss", tools: list[dict[str, Any]], persona: str = "Executive", skills: list[dict[str, Any]] | None = None) -> str:
     tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
+    
+    skills_block = ""
+    if skills:
+        skills_block = "\nCustom User Skills (Macros):\nIf the user's request matches a 'trigger' below, execute the corresponding 'action' instead of figuring out the steps yourself.\n"
+        for s in skills:
+            skills_block += f"- Trigger: \"{s['trigger']}\" => Action: \"{s['action']}\"\n"
+
     return f"""{build_persona_block(assistant_name=assistant_name, user_name=user_name, persona=persona)}
 You are a task planner. Your goal is to break down complex user requests into discrete tool-based steps.
-
+{skills_block}
 Available Tools:
 {tools_json}
 

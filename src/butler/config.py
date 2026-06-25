@@ -55,19 +55,31 @@ class ButlerConfig(BaseModel):
                             migrated.append(item)
                     data[key_field] = migrated
 
-            # Seed from env vars if lists are empty
-            if not data.get("gemini_api_keys"):
-                env = os.getenv("BUTLER_GEMINI_API_KEY", "")
-                if env:
-                    data["gemini_api_keys"] = [{"key": env, "label": "env"}]
-            if not data.get("claude_api_keys"):
-                env = os.getenv("BUTLER_CLAUDE_API_KEY", "")
-                if env:
-                    data["claude_api_keys"] = [{"key": env, "label": "env"}]
-            if not data.get("nvidia_api_keys"):
-                env = os.getenv("BUTLER_NVIDIA_API_KEY", "")
-                if env:
-                    data["nvidia_api_keys"] = [{"key": env, "label": "env"}]
+            def _parse_env_keys(env_str: str) -> list[dict]:
+                if not env_str: return []
+                env_str = env_str.strip()
+                if env_str.startswith("["):
+                    try:
+                        import json
+                        parsed = json.loads(env_str)
+                        if isinstance(parsed, list):
+                            return parsed
+                    except:
+                        pass
+                return [{"key": env_str, "label": "env"}]
+
+            # Force override from env vars to ensure .env is the source of truth
+            env = os.getenv("BUTLER_GEMINI_API_KEY", "")
+            if env:
+                data["gemini_api_keys"] = _parse_env_keys(env)
+            
+            env = os.getenv("BUTLER_CLAUDE_API_KEY", "")
+            if env:
+                data["claude_api_keys"] = _parse_env_keys(env)
+                
+            env = os.getenv("BUTLER_NVIDIA_API_KEY", "")
+            if env:
+                data["nvidia_api_keys"] = _parse_env_keys(env)
         return data
     spotify_client_id: str = Field(default_factory=lambda: os.getenv("BUTLER_SPOTIFY_CLIENT_ID", ""))
     spotify_client_secret: str = Field(default_factory=lambda: os.getenv("BUTLER_SPOTIFY_CLIENT_SECRET", ""))
@@ -77,6 +89,10 @@ class ButlerConfig(BaseModel):
     tts_provider: str = Field(default_factory=lambda: os.getenv("BUTLER_TTS_PROVIDER", "edge-tts"))
     model: str = Field(default_factory=lambda: os.getenv("BUTLER_MODEL", "mistral:7b-instruct"))
     chat_model: str = Field(default_factory=lambda: os.getenv("BUTLER_CHAT_MODEL", "gemma:2b"))
+    vision_model: str = Field(default_factory=lambda: os.getenv("BUTLER_VISION_MODEL", "google/gemma-3n-e4b-it"))
+    embedding_model: str = Field(default_factory=lambda: os.getenv("BUTLER_EMBEDDING_MODEL", "nvidia/nv-embed-v1"))
+    skill_compiler_provider: str = Field(default_factory=lambda: os.getenv("BUTLER_SKILL_COMPILER_PROVIDER", os.getenv("BUTLER_PROVIDER", "ollama")))
+    skill_compiler_model: str = Field(default_factory=lambda: os.getenv("BUTLER_SKILL_COMPILER_MODEL", os.getenv("BUTLER_MODEL", "mistral:7b-instruct")))
     fallback_models: list[str] = Field(default_factory=list)
     nvidia_tts_reference_audio: str = Field(default_factory=lambda: os.getenv("BUTLER_NVIDIA_TTS_REFERENCE_AUDIO", ""))
     rate: str = "+0%"
@@ -129,12 +145,25 @@ class ButlerConfig(BaseModel):
         ]
     )
 
+    telegram_bot_token: str = Field(default_factory=lambda: os.getenv("BUTLER_TELEGRAM_BOT_TOKEN", ""))
+    telegram_allowed_user: str = Field(default_factory=lambda: os.getenv("BUTLER_TELEGRAM_ALLOWED_USER", ""))
+    telegram_chat_id: int | None = None
+
+    github_token: str = Field(default_factory=lambda: os.getenv("BUTLER_GITHUB_TOKEN", ""))
+
+    supabase_url: str = Field(default_factory=lambda: os.getenv("BUTLER_SUPABASE_URL", ""))
+    supabase_key: str = Field(default_factory=lambda: os.getenv("BUTLER_SUPABASE_KEY", ""))
+
     max_file_bytes: int = 512_000
     tool_timeout_seconds: int = 10
     max_tool_iterations: int = 6
 
 
 def load_config() -> ButlerConfig:
+    from dotenv import load_dotenv
+    # Load .env file from the current directory, overriding existing env vars if needed
+    load_dotenv(override=True)
+
     path = config_path()
     ensure_dir(path.parent)
     if not path.exists():
@@ -144,6 +173,23 @@ def load_config() -> ButlerConfig:
     # Be tolerant of UTF-8 BOM (common on Windows when files are edited by some tools).
     raw = path.read_text(encoding="utf-8-sig")
     data = json.loads(raw) if raw.strip() else {}
+    
+    # SECURITY & CONFIG MIGRATION: Force env vars to override plaintext JSON config
+    for key, env_var in [
+        ("spotify_client_id", "BUTLER_SPOTIFY_CLIENT_ID"),
+        ("spotify_client_secret", "BUTLER_SPOTIFY_CLIENT_SECRET"),
+        ("telegram_bot_token", "BUTLER_TELEGRAM_BOT_TOKEN"),
+        ("telegram_allowed_user", "BUTLER_TELEGRAM_ALLOWED_USER"),
+        ("model", "BUTLER_MODEL"),
+        ("chat_model", "BUTLER_CHAT_MODEL"),
+        ("vision_model", "BUTLER_VISION_MODEL"),
+        ("embedding_model", "BUTLER_EMBEDDING_MODEL"),
+        ("skill_compiler_provider", "BUTLER_SKILL_COMPILER_PROVIDER"),
+        ("skill_compiler_model", "BUTLER_SKILL_COMPILER_MODEL"),
+    ]:
+        if os.getenv(env_var) and key in data:
+            del data[key]
+            
     return ButlerConfig.model_validate(data)
 
 

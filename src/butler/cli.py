@@ -118,6 +118,8 @@ def _changeable_config_items(config: ButlerConfig) -> list[MenuItem[str]]:
         MenuItem("Fallback Models", "fallback_models", f"Current: {', '.join(config.fallback_models) or 'none'}"),
         MenuItem("User Name", "user_name", f"Current: {config.user_name}"),
         MenuItem("Home Location", "home_location", f"Current: {config.home_location}"),
+        MenuItem("Telegram Bot Token", "telegram_bot_token", f"Current: {mask_secret(config.telegram_bot_token)}"),
+        MenuItem("Telegram Allowed User", "telegram_allowed_user", f"Current: {config.telegram_allowed_user}"),
     ]
 
 
@@ -177,11 +179,17 @@ def _change_config_value(config: ButlerConfig) -> ButlerConfig:
                 print(f"Saved TTS Provider: {sel.value}")
             continue
         if key in ("gemini_api_keys", "claude_api_keys", "nvidia_api_keys"):
-            label = "Gemini" if "gemini" in key else ("Claude" if "claude" in key else "Nvidia")
-            config = _manage_api_keys(config, label, key)
+            print(f"\n[SECURITY] {selected.label} must be configured in your .env file.")
+            print("Please edit the .env file in your BUTLER directory to update API keys.")
+            input("Press Enter to continue...")
             continue
 
-        secret_fields = {"spotify_client_id", "spotify_client_secret"}
+        secret_fields = {"spotify_client_id", "spotify_client_secret", "telegram_bot_token", "telegram_allowed_user"}
+        if key in secret_fields:
+            print(f"\n[SECURITY] {selected.label} must be configured in your .env file.")
+            print("Please edit the .env file in your BUTLER directory to update this secret.")
+            input("Press Enter to continue...")
+            continue
         
         if key == "fallback_models":
             current_value = ", ".join(getattr(config, key))
@@ -191,7 +199,7 @@ def _change_config_value(config: ButlerConfig) -> ButlerConfig:
             new_value = [m.strip() for m in new_value_str.split(",") if m.strip()]
         else:
             current_value = getattr(config, key)
-            new_value = prompt_text(selected.label, current=str(current_value), secret=key in secret_fields)
+            new_value = prompt_text(selected.label, current=str(current_value))
             if new_value is None:
                 continue
 
@@ -285,6 +293,34 @@ def _cmd_notes(config: ButlerConfig, runtime: AgentRuntime, args: list[str]) -> 
         return
 
 
+def _cmd_telecho(config: ButlerConfig, args: list[str]) -> None:
+    if not args:
+        print("Usage: /Telecho <message>")
+        return
+    
+    msg = " ".join(args)
+    text_to_send = f"/Telecho {msg}"
+    print(text_to_send)
+
+    if not config.telegram_bot_token:
+        print("Telegram bot token not configured.")
+        return
+    
+    chat_id = getattr(config, "telegram_chat_id", None)
+    if not chat_id:
+        print("Telegram chat ID not known. Please send a message to the bot first.")
+        return
+
+    try:
+        import requests
+        url = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendMessage"
+        resp = requests.post(url, json={"chat_id": chat_id, "text": text_to_send}, timeout=10)
+        resp.raise_for_status()
+        print("Successfully echoed to Telegram.")
+    except Exception as e:
+        print(f"Failed to send to Telegram: {e}")
+
+
 def _handle_slash_command(
     line: str, config: ButlerConfig, runtime: AgentRuntime
 ) -> ButlerConfig:
@@ -298,6 +334,9 @@ def _handle_slash_command(
         return config
     if cmd == "/notes":
         _cmd_notes(config, runtime, args)
+        return config
+    if cmd.lower() == "/telecho":
+        _cmd_telecho(config, args)
         return config
     if cmd == "/live":
         # This is handled dynamically by the engine in GUI mode
@@ -372,9 +411,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--auth-spotify", action="store_true", help="Authenticate Spotify safely before launching the voice loop")
     ns = parser.parse_args(argv)
 
-    log_level = os.getenv("BUTLER_LOG_LEVEL", "").strip().upper()
-    if log_level:
-        logging.basicConfig(level=getattr(logging, log_level, logging.INFO), format="%(levelname)s %(name)s: %(message)s")
+    log_level_str = os.getenv("BUTLER_LOG_LEVEL", "INFO").strip().upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    
+    # Configure rotating file handler for cloud observability
+    from logging.handlers import RotatingFileHandler
+    from butler.paths import butler_home_dir
+    
+    log_dir = butler_home_dir()
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = log_dir / "butler.log"
+    
+    file_handler = RotatingFileHandler(
+        filename=log_file,
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=3,
+        encoding="utf-8"
+    )
+    
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[file_handler]
+    )
+    
+    # Also log critically to stdout if in debug, otherwise keep stdout clean for the CLI menu
+    if log_level == logging.DEBUG:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        logging.getLogger().addHandler(console_handler)
 
     config = load_config()
     from butler.config import save_config
@@ -432,8 +497,8 @@ def main(argv: list[str] | None = None) -> int:
     if ns.nvidia:
         config = config.model_copy(update={
             "provider": "nvidia",
-            "model": "mistralai/mistral-nemotron",
-            "chat_model": "mistralai/mistral-nemotron"
+            "model": "mistralai/ministral-14b-instruct-2512",
+            "chat_model": "mistralai/ministral-14b-instruct-2512"
         })
 
     from butler.config import save_config, ApiKeyConfig
@@ -495,33 +560,21 @@ def main(argv: list[str] | None = None) -> int:
 
 
     if ns.gui:
-        import threading
-        gui_confirm_event = threading.Event()
-        gui_confirm_result = [False]
-
         def gui_confirm(name, arguments):
             if hasattr(state, "widget"):
-                # Run in GUI thread
                 state.widget.after(0, lambda: state.widget.show_tool_confirmation(
                     f"Allow tool '{name}' with args {json.dumps(arguments, ensure_ascii=False)}?"
                 ))
-                gui_confirm_event.wait()
-                res = gui_confirm_result[0]
-                gui_confirm_event.clear()
-                return res
-            return True
-
-        gui_plan_event = threading.Event()
-        gui_plan_result = [False]
+            print(f"\nTool confirmation requested: {name} {json.dumps(arguments, ensure_ascii=False)}")
+            return _confirm(
+                f"Allow tool '{name}' with args {json.dumps(arguments, ensure_ascii=False)}?"
+            )
 
         def gui_plan_review(plan_text: str):
             if hasattr(state, "widget"):
                 state.widget.after(0, lambda: state.widget.show_plan_review(plan_text))
-                gui_plan_event.wait()
-                res = gui_plan_result[0]
-                gui_plan_event.clear()
-                return res
-            return True
+            print("\nPlan review:\n" + plan_text)
+            return _confirm("Approve this task plan?")
 
         confirm_tool = gui_confirm
         plan_review = gui_plan_review
@@ -554,6 +607,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         raise
+
+    # Start Telegram background daemon if configured
+    if config.telegram_bot_token:
+        from butler.telegram_bot import TelegramDaemon
+        telegram_daemon = TelegramDaemon(config, runtime)
+        telegram_daemon.start()
 
     if ns.gui:
         from PySide6.QtWidgets import QApplication
@@ -616,18 +675,6 @@ def main(argv: list[str] | None = None) -> int:
         def safe_status(s):
             if hasattr(state, "widget"):
                 state.widget.set_status(s)
-                
-        def on_tool_confirm_click(allowed: bool):
-            gui_confirm_result[0] = allowed
-            gui_confirm_event.set()
-
-        def on_persona_change(persona: str):
-            nonlocal config
-            config.persona = persona
-            save_config(config)
-            runtime.config = config
-            runtime.__post_init__() # Refresh system prompts
-            print(f"Persona switched to: {persona}")
 
         def on_status_narration(text: str):
             # Proactive TTS for autonomous steps
@@ -645,21 +692,18 @@ def main(argv: list[str] | None = None) -> int:
             if enabled:
                 # If turning ON, trigger manual listen to start the loop
                 engine.trigger_manual_listen()
+                if hasattr(state, "widget"):
+                    state.widget.set_status("Live mode ON")
+            else:
+                if hasattr(state, "widget"):
+                    state.widget.set_status("Live mode OFF")
             print(f"Live mode: {'ON' if enabled else 'OFF'}")
-        
-        def on_plan_confirm_click(allowed: bool):
-            gui_plan_result[0] = allowed
-            gui_plan_event.set()
 
         state.widget = ButlerWidget(
             on_mic_click=engine.trigger_manual_listen, 
             on_wake_toggle=engine.toggle_wake_word,
             on_text_submit=on_stt_command,
-            on_tool_confirm=on_tool_confirm_click,
-            on_persona_change=on_persona_change,
-            on_plan_confirm=on_plan_confirm_click,
-            on_live_toggle=on_live_toggle,
-            initial_persona=config.persona
+            on_live_toggle=on_live_toggle
         )
         
         state.widget.show()

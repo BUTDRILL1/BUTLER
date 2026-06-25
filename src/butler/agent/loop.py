@@ -280,11 +280,13 @@ class AgentRuntime:
     confirm_tool: Callable[[str, dict[str, Any]], bool] | None = None
     on_status_update: Callable[[str], None] | None = None
     on_plan_review: Callable[[str], bool] | None = None
+    on_reminder: Callable[[str, str], None] | None = None  # (message, reminder_id) -> None
     memory: MemoryStore | None = None
     watcher: WorkspaceWatcher | None = field(init=False, default=None)
-    _action_system_prompt: str = field(init=False, repr=False, compare=False, default="")
     _chat_system_prompt: str = field(init=False, repr=False, compare=False, default="")
     _has_chat_stream: bool = field(init=False, repr=False, compare=False, default=False)
+    _reminder_thread: Any = field(init=False, repr=False, compare=False, default=None)
+    _reminder_stop: Any = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
         if self.provider is None:
@@ -310,6 +312,7 @@ class AgentRuntime:
                 self.provider = NvidiaProvider(
                     api_keys=self.config.nvidia_api_keys,
                     model=self.config.model,
+                    embedding_model=self.config.embedding_model,
                     fallback_models=self.config.fallback_models,
                     timeout_seconds=self.config.model_timeout_seconds,
                     retry_count=self.config.model_retry_count,
@@ -330,12 +333,6 @@ class AgentRuntime:
             mem_db = butler_home_dir() / "memory.db"
             self.memory = MemoryStore(str(mem_db), self.provider)
 
-        self._action_system_prompt = build_system_prompt(
-            assistant_name=self.config.assistant_name,
-            user_name=self.config.user_name,
-            tools=self.tools.describe(),
-            persona=self.config.persona,
-        )
         self._chat_system_prompt = build_chat_system_prompt(
             assistant_name=self.config.assistant_name,
             user_name=self.config.user_name,
@@ -347,6 +344,15 @@ class AgentRuntime:
             existing = self.db.get_last_conversation()
             self.conversation_id = existing or self.db.new_conversation()
 
+    @property
+    def action_system_prompt(self) -> str:
+        return build_system_prompt(
+            assistant_name=self.config.assistant_name,
+            user_name=self.config.user_name,
+            tools=self.tools.describe(),
+            persona=self.config.persona,
+        )
+
     def start_watcher(self):
         if self.watcher:
             self.watcher.start()
@@ -354,6 +360,49 @@ class AgentRuntime:
     def stop_watcher(self):
         if self.watcher:
             self.watcher.stop()
+
+    def start_reminder_loop(self) -> None:
+        """Start a background thread that polls for due reminders every 30 seconds."""
+        import threading
+        if self._reminder_thread and self._reminder_thread.is_alive():
+            return
+
+        self._reminder_stop = threading.Event()
+
+        def _loop():
+            logger.info("reminder_loop_started poll_interval=30s")
+            while not self._reminder_stop.wait(timeout=30):
+                if self.on_reminder is None:
+                    continue
+                try:
+                    due = self.db.get_pending_reminders()
+                    for r in due:
+                        try:
+                            self.on_reminder(r["message"], r["id"])
+                            recurrence = r.get("recurrence_minutes")
+                            if recurrence:
+                                # Recurring: push trigger_time forward, don't mark as sent
+                                self.db.reschedule_recurring_reminder(r["id"], recurrence)
+                                logger.info("reminder_rescheduled id=%s recurrence_minutes=%s", r["id"], recurrence)
+                            else:
+                                # One-shot: mark as sent
+                                self.db.mark_reminder_sent(r["id"])
+                                logger.info("reminder_fired id=%s", r["id"])
+                        except Exception as e:
+                            logger.warning("reminder_fire_failed id=%s error=%s", r["id"], e)
+                except Exception as e:
+                    logger.warning("reminder_loop_poll_failed error=%s", e)
+            logger.info("reminder_loop_stopped")
+
+        self._reminder_thread = threading.Thread(
+            target=_loop, daemon=True, name="ReminderLoop"
+        )
+        self._reminder_thread.start()
+
+    def stop_reminder_loop(self) -> None:
+        """Signal the reminder loop to stop cleanly."""
+        if self._reminder_stop:
+            self._reminder_stop.set()
 
     def _record_to_memory(self, role: str, content: str):
         """Asynchronously index a message into semantic memory."""
@@ -368,48 +417,74 @@ class AgentRuntime:
 
     def _generate_plan(self, user_text: str) -> PlanResult:
         """Generate a multi-step task plan for complex requests."""
+        skills = self.db.list_skills() if hasattr(self.db, "list_skills") else []
         planning_prompt = build_planning_prompt(
             assistant_name=self.config.assistant_name,
             user_name=self.config.user_name,
             tools=self.tools.describe(),
-            persona=self.config.persona
+            persona=self.config.persona,
+            skills=skills
         )
         
-        messages = [
-            {"role": "system", "content": planning_prompt},
-            {"role": "user", "content": user_text}
-        ]
+        from datetime import datetime
+        now_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
         
+        messages = [{"role": "system", "content": planning_prompt}]
+        messages.append({"role": "system", "content": f"SYSTEM TIME CONTEXT: The current local time is {now_str}. Use this to calculate accurate absolute times for any scheduling or reminders."})
+        # Give planner history so it understands follow-up context (like "Who is he?")
+        messages.extend(self._chat_history_messages(limit=6))
+        messages.append({"role": "user", "content": user_text})
+        
+        # Add a final reminder to the model to stay in JSON mode despite the history
+        messages.append({"role": "user", "content": "IMPORTANT: Return ONLY the JSON plan for the latest message. Do not chat or narrate."})
+        
+        content = "N/A"
         try:
             content = self.provider.chat(messages, temperature=0.0)
             # Cleanup Markdown noise (e.g. ```json ... ```)
-            if "```" in content:
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:].strip()
-                content = content.strip()
+            json_text = content
+            if "```" in json_text:
+                json_text = json_text.split("```")[1]
+                if json_text.startswith("json"):
+                    json_text = json_text[4:].strip()
+                json_text = json_text.strip()
             
-            data = json.loads(content)
+            # If the model still returned a natural response before/after JSON, try to find the { }
+            if "{" in json_text and "}" in json_text:
+                json_text = json_text[json_text.find("{"):json_text.rfind("}")+1]
+
+            data = json.loads(json_text)
             return PlanResult(**data)
         except Exception as e:
-            logger.warning("planner_failed error=%s content=%s", e, content if 'content' in locals() else "N/A")
+            logger.warning("planner_failed error=%s content=%s", e, content)
+            # If planning fails, fall back to a direct chat response
             return PlanResult(is_direct_chat=True)
 
-    def _chat_history_messages(self, limit: int = 3) -> list[dict[str, Any]]:
+    def _chat_history_messages(self, limit: int = 10, exclude_current: bool = True) -> list[dict[str, Any]]:
         assert self.conversation_id is not None
-        history = self.db.list_messages(self.conversation_id, limit=max(1, limit * 2))
+        # Fetch a bit more than we need to account for filtering
+        history = self.db.list_messages(self.conversation_id, limit=limit + 5)
         filtered: list[dict[str, Any]] = []
-        for message in history:
+        
+        # If we just added the user message to the DB, it will be in history[0].
+        # We usually want to exclude it because we append user_text manually in the chat methods.
+        history_to_process = history
+        if exclude_current and history:
+            history_to_process = history[:-1]
+
+        for message in history_to_process:
             role = message.get("role", "")
             content = message.get("content", "")
             if not isinstance(content, str):
                 continue
             stripped = content.strip()
-            if stripped.startswith("{") or stripped.startswith("TOOL_"):
+            # Skip technical noise or empty turns
+            if stripped.startswith("{") or stripped.startswith("TOOL_") or not stripped:
                 continue
             if role == "assistant" and _looks_like_refusal(content):
                 continue
             filtered.append(message)
+        
         return filtered[-limit:]
 
     def _provider_chat(self, messages: list[dict[str, Any]], *, temperature: float, model: str) -> str:
@@ -422,7 +497,12 @@ class AgentRuntime:
         yield self._provider_chat(messages, temperature=temperature, model=model)
 
     def _chat_mode_reply(self, model: str, user_text: str) -> str:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": self._chat_system_prompt}]
+        from datetime import datetime
+        now_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._chat_system_prompt},
+            {"role": "system", "content": f"SYSTEM TIME CONTEXT: The current local time is {now_str}."}
+        ]
         messages.extend(self._chat_history_messages())
         messages.append({"role": "user", "content": user_text})
         try:
@@ -431,14 +511,21 @@ class AgentRuntime:
             logger.warning("chat_mode_failed model=%s error=%s", model, e)
             return _get_fallback_error_message(e)
 
-    def _chat_mode_reply_stream(self, model: str, user_text: str) -> Any:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": self._chat_system_prompt}]
+    def _chat_mode_reply_stream(self, model: str, user_text: str, cancel_event: threading.Event | None = None) -> Any:
+        from datetime import datetime
+        now_str = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._chat_system_prompt},
+            {"role": "system", "content": f"SYSTEM TIME CONTEXT: The current local time is {now_str}."}
+        ]
         messages.extend(self._chat_history_messages())
         messages.append({"role": "user", "content": user_text})
         try:
             started = time.perf_counter()
             first_token = True
             for token in self._provider_chat_stream(messages, temperature=0.2, model=model):
+                if cancel_event and cancel_event.is_set():
+                    break
                 if first_token:
                     logger.info(
                         "chat_first_token conversation_id=%s model=%s latency_ms=%d",
@@ -491,16 +578,16 @@ class AgentRuntime:
             len(user_text.strip()),
         )
 
-    def chat_once(self, user_text: str) -> str:
-        return "".join(list(self.chat_once_stream(user_text)))
+    def chat_once(self, user_text: str, auto_approve: bool = False) -> str:
+        return "".join(list(self.chat_once_stream(user_text, auto_approve=auto_approve)))
 
-    def chat_once_stream(self, user_text: str) -> Any:
+    def chat_once_stream(self, user_text: str, auto_approve: bool = False, cancel_event: threading.Event | None = None) -> Any:
         try:
-            yield from self._chat_once_stream_impl(user_text)
+            yield from self._chat_once_stream_impl(user_text, auto_approve=auto_approve, cancel_event=cancel_event)
         finally:
             self.db.flush_turn()
 
-    def _chat_once_stream_impl(self, user_text: str) -> Any:
+    def _chat_once_stream_impl(self, user_text: str, auto_approve: bool = False, cancel_event: threading.Event | None = None) -> Any:
         assert self.conversation_id is not None
         turn_started = time.perf_counter()
         self.db.add_message(self.conversation_id, "user", user_text)
@@ -517,7 +604,10 @@ class AgentRuntime:
         if plan_res.is_direct_chat or not plan_res.plan:
             # Traditional Chat Route
             full_response = ""
-            for token in self._chat_mode_reply_stream(self.config.chat_model, user_text):
+            for token in self._chat_mode_reply_stream(self.config.chat_model, user_text, cancel_event=cancel_event):
+                if cancel_event and cancel_event.is_set():
+                    yield "\n\n*(Request cancelled)*"
+                    return
                 full_response += token
                 yield token
             self.db.add_message(self.conversation_id, "assistant", full_response)
@@ -525,7 +615,7 @@ class AgentRuntime:
             return
 
         # 1.5 Plan Review (Safety Check)
-        if self.on_plan_review:
+        if self.on_plan_review and not auto_approve:
             plan_summary = f"GOAL: {plan_res.plan.goal}\n\nSTEPS:\n"
             for s in plan_res.plan.steps:
                 plan_summary += f"{s.id}. {s.description}\n   > {s.narration}\n"
@@ -537,6 +627,10 @@ class AgentRuntime:
         # 2. Autonomous Execution Phase
         results_context = []
         for step in plan_res.plan.steps:
+            if cancel_event and cancel_event.is_set():
+                yield "\n\n*(Task cancelled)*"
+                return
+
             # Trigger Proactive TTS Status
             if self.on_status_update:
                 self.on_status_update(step.narration)
@@ -554,7 +648,10 @@ class AgentRuntime:
         summary_prompt += "\n\nProvide a final, natural response to the user based on these results."
         
         full_response = ""
-        for token in self._chat_mode_reply_stream(self.config.chat_model, summary_prompt):
+        for token in self._chat_mode_reply_stream(self.config.chat_model, summary_prompt, cancel_event=cancel_event):
+            if cancel_event and cancel_event.is_set():
+                yield "\n\n*(Task cancelled)*"
+                return
             full_response += token
             yield token
         
@@ -596,7 +693,7 @@ class AgentRuntime:
             return "\n".join(lines).strip()
 
         history = self.db.list_messages(self.conversation_id, limit=6)
-        action_messages: list[dict[str, Any]] = [{"role": "system", "content": self._action_system_prompt}]
+        action_messages: list[dict[str, Any]] = [{"role": "system", "content": self.action_system_prompt}]
         action_messages.extend(history)
         if route == "ACTION" and reason == "weather_request":
             action_messages.append(
@@ -922,8 +1019,8 @@ class AgentRuntime:
                         continue
 
                 if tool.side_effect and self.config.confirm_writes:
-                    # Bypass confirmation if the tool is in the auto_approve_tools list
-                    if action.name in self.config.auto_approve_tools:
+                    # Bypass confirmation if the tool is in the auto_approve_tools list or if auto_approve is True
+                    if auto_approve or action.name in self.config.auto_approve_tools:
                         allowed = True
                     else:
                         allowed = False

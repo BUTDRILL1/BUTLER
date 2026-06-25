@@ -4,569 +4,921 @@
 <meta charset="UTF-8">
 <title>Butler</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <script src="qwebchannel.js"></script>
 <style>
 :root {
-    --bg: transparent;
-    --panel: rgba(10,14,24,0.94);
-    --line: rgba(95,119,153,0.14);
-    --line2: rgba(95,119,153,0.22);
-    --text: #d5def0;
-    --muted: #7f8ca7;
-    --blue: #2d78d5;
-    --blue2: #7fb4ff;
-    --teal: #23b98d;
-    --teal2: #78e3c2;
-    --purple: #7f6ef0;
-    --purple2: #b0a6ff;
-    --red: #d85c5c;
-    --red2: #ff8585;
-    --amber: #f0b85f;
-    --mono: 'Share Tech Mono', monospace;
-    --head: 'Rajdhani', sans-serif;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{
-    width:100%;height:100%;overflow:hidden;
-    background:transparent!important;
-    font-family:var(--head);
-    user-select:none;-webkit-user-select:none;
+    --bg-0: rgba(4, 8, 18, .42);
+    --bg-1: rgba(9, 17, 34, .82);
+    --bg-2: rgba(13, 25, 47, .72);
+    --line: rgba(155, 215, 255, .22);
+    --line-hot: rgba(122, 236, 255, .58);
+    --text: #e8f7ff;
+    --muted: rgba(210, 235, 255, .62);
+    --green: #2df58a;
+    --orange: #ff9f2f;
+    --purple: #d86cff;
+    --blue: #25d9ff;
+    --red: #ff3e5f;
+    --yellow: #ffe45c;
+    --mono: 'Share Tech Mono', Consolas, monospace;
+    --head: 'Rajdhani', 'Segoe UI', sans-serif;
+    --pad: clamp(10px, 2.2vw, 18px);
+    --button: clamp(44px, 10.5vh, 66px);
+    --icon: calc(var(--button) * .56);
+    --utility: clamp(22px, 5.2vh, 30px);
 }
 
-/* ═══ ORBITAL CONTAINER ═══ */
-.orbital{
-    position:absolute;
-    right:80px; top:160px;
-    width:0;height:0;
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
 }
 
-/* ═══ HUB BUTTON (I) ═══ */
-.hub{
-    position:absolute;
-    left:-38px;top:-38px;
-    width:76px;height:76px;
-    border-radius:50%;
-    cursor:pointer;
-    z-index:20;
-    transition:transform .13s,filter .18s;
+html,
+body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent !important;
+    color: var(--text);
+    font-family: var(--head);
+    user-select: none;
+    -webkit-user-select: none;
 }
-.hub:active{transform:scale(.92)}
-.hub:hover{filter:brightness(1.15)}
-.hub svg{width:100%;height:100%}
 
-.hub-ring{
-    position:absolute;inset:-7px;border-radius:50%;
-    border:1px solid rgba(127,110,240,.18);
-    animation:hubSpin 4s linear infinite;
-    pointer-events:none;
+button,
+input {
+    font: inherit;
 }
-.hub-ring::before{
-    content:'';position:absolute;top:-2px;left:50%;
-    width:4px;height:4px;border-radius:50%;
-    background:var(--purple2);transform:translateX(-50%);
-}
-@keyframes hubSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 
-/* Hub recording state */
-.hub.recording{filter:drop-shadow(0 0 16px rgba(127,110,240,.75))!important}
-.hub.recording svg .mic-body{fill:#241d4f!important;stroke:var(--purple2)!important}
-.hub.recording .hub-ring{border-color:rgba(176,166,255,.5);animation:hubSpin .6s linear infinite}
+button {
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+}
 
-/* Hub live state */
-.hub.st-live-mic{filter:drop-shadow(0 0 16px rgba(216,92,92,.65))!important}
-.hub.st-live-mic svg .mic-body{fill:#451010!important;stroke:var(--red2)!important}
-.hub.st-live-mic .hub-ring{border-color:rgba(255,133,133,.45);animation:hubSpin .7s linear infinite}
-.hub.st-live-mic .hub-ring::before{background:var(--red2)}
+.widget-root {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: stretch;
+    padding: clamp(6px, 1.5vw, 12px);
+}
 
-/* ═══ SATELLITES ═══ */
-.sat{
-    position:absolute;
-    left:-26px;top:-26px;
-    width:52px;height:52px;
-    border-radius:50%;
-    cursor:pointer;
-    opacity:0;
-    transform:scale(0);
-    pointer-events:none;
-    z-index:15;
-    transition:transform .35s cubic-bezier(.34,1.56,.64,1),opacity .2s;
+.dock {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: max-content max-content;
+    align-items: center;
+    gap: clamp(8px, 1.7vw, 18px);
+    padding: var(--pad) clamp(42px, 8vw, 66px) var(--pad) clamp(38px, 7vw, 58px);
+    border: 1px solid var(--line);
+    border-radius: clamp(20px, 5vh, 34px);
+    background:
+        radial-gradient(circle at 82% 18%, rgba(37, 217, 255, .18), transparent 28%),
+        radial-gradient(circle at 18% 82%, rgba(216, 108, 255, .14), transparent 25%),
+        linear-gradient(135deg, var(--bg-1), var(--bg-0) 45%, var(--bg-2));
+    box-shadow:
+        0 18px 42px rgba(0, 0, 0, .42),
+        inset 0 1px 0 rgba(255, 255, 255, .11),
+        inset 0 -1px 0 rgba(0, 0, 0, .28);
+    backdrop-filter: blur(18px) saturate(1.18);
+    overflow: hidden;
+    justify-content: start;
 }
-.sat svg{width:100%;height:100%}
-.sat:active{transform:scale(.88)!important}
-.sat:hover{filter:brightness(1.2)}
 
-/* Expanded positions — offsets from hub center */
-.orbital.expanded .sat{opacity:1;pointer-events:auto}
-.orbital.expanded .sat-ii{transform:translate(50px,-95px) scale(1);transition-delay:0s}
-.orbital.expanded .sat-iii{transform:translate(-100px,-55px) scale(1);transition-delay:.04s}
-.orbital.expanded .sat-iv{transform:translate(-80px,70px) scale(1);transition-delay:.08s}
-.orbital.expanded .sat-v{transform:translate(-10px,115px) scale(1);transition-delay:.12s}
+body.has-focus-mode .dock {
+    grid-template-columns: max-content max-content minmax(0, 1fr);
+}
 
-/* Satellite active states */
-.sat.st-live svg .live-dot{animation:livePop .75s ease-in-out infinite alternate}
-@keyframes livePop{from{r:4}to{r:7.5}}
-.sat.st-wake svg .ring{stroke:var(--teal2)!important}
-.sat.st-wake svg .core{fill:var(--teal)!important}
-.sat.st-wake{filter:drop-shadow(0 0 8px rgba(35,185,141,.35))}
-.sat.st-wake svg .pulse{animation:pRing 1.3s ease-out infinite}
-@keyframes pRing{0%{r:12;opacity:.75}100%{r:32;opacity:0}}
-.sat.st-text svg .tb-cursor{animation:cur .85s step-end infinite}
-@keyframes cur{0%,100%{opacity:1}50%{opacity:0}}
-.sat.st-chat svg .chat-bg{fill:#0f241d!important;stroke:var(--teal2)!important}
+body:not(.has-focus-mode) .dock {
+    padding-right: clamp(30px, 6vw, 48px);
+}
 
-/* ═══ CONNECTOR LINES ═══ */
-.connectors{
-    position:absolute;left:0;top:0;
-    width:1px;height:1px;
-    overflow:visible;
-    z-index:5;
-    pointer-events:none;
+.dock::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(rgba(122, 236, 255, .055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(122, 236, 255, .045) 1px, transparent 1px);
+    background-size: 22px 22px;
+    mask-image: radial-gradient(circle at 64% 50%, black, transparent 76%);
+    pointer-events: none;
 }
-.conn-line{
-    stroke:rgba(127,180,255,.12);
-    stroke-width:1;
-    opacity:0;
-    transition:opacity .25s;
-}
-.orbital.expanded .conn-line{opacity:1}
 
-/* ═══ WINDOW DOTS ═══ */
-.dot{
-    position:absolute;
-    width:14px;height:14px;
-    border-radius:50%;
-    cursor:pointer;
-    border:1px solid;
-    z-index:20;
-    transition:transform .12s,filter .15s,background .15s;
+.dock::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: inherit;
+    border: 1px solid rgba(255, 255, 255, .055);
+    pointer-events: none;
 }
-.dot:active{transform:scale(.82)}
-.dot-kill{
-    left:55px;top:-20px;
-    border-color:rgba(216,92,92,.4);
-    background:rgba(216,92,92,.18);
-}
-.dot-kill:hover{background:rgba(216,92,92,.35);filter:drop-shadow(0 0 5px rgba(216,92,92,.4))}
-.dot-min{
-    left:55px;top:5px;
-    border-color:rgba(240,184,95,.4);
-    background:rgba(240,184,95,.18);
-}
-.dot-min:hover{background:rgba(240,184,95,.35);filter:drop-shadow(0 0 5px rgba(240,184,95,.4))}
 
-/* ═══ DRAG HANDLE ═══ */
-.drag-grip{
-    position:absolute;
-    left:55px;top:30px;
-    width:14px;height:12px;
-    border-radius:3px;
-    border:1px solid rgba(127,110,240,.3);
-    background:rgba(127,110,240,.12);
-    cursor:grab;
-    display:flex;flex-direction:column;
-    align-items:center;justify-content:center;gap:2px;
-    z-index:20;
+.utility-stack {
+    position: absolute;
+    left: clamp(9px, 2vw, 16px);
+    top: 50%;
+    z-index: 4;
+    display: grid;
+    gap: clamp(8px, 1.7vh, 13px);
+    transform: translateY(-50%);
 }
-.drag-grip:active{cursor:grabbing}
-.drag-grip span{display:block;width:8px;height:1px;background:rgba(176,166,255,.55);border-radius:1px}
 
-/* ═══ TEXT BAR ═══ */
-.text-bar{
-    position:absolute;
-    right:80px;top:300px;
-    width:280px;
-    max-height:0;overflow:hidden;opacity:0;
-    background:linear-gradient(180deg,rgba(8,12,20,.96),rgba(5,8,14,.98));
-    border:1px solid var(--line);
-    border-radius:14px;
-    transition:max-height .3s cubic-bezier(.4,0,.2,1),opacity .25s;
-    z-index:10;
+.utility {
+    width: var(--utility);
+    height: var(--utility);
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(255, 255, 255, .18);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .08);
+    box-shadow: 0 0 18px rgba(255, 255, 255, .08), inset 0 0 10px rgba(255, 255, 255, .08);
+    transition: transform .14s ease, filter .18s ease, box-shadow .18s ease;
 }
-.text-bar.open{max-height:54px;opacity:1}
-.text-inner{
-    display:flex;align-items:center;
-    padding:0 14px;height:52px;gap:8px;
-}
-.text-inner input{
-    flex:1;background:transparent;border:none;
-    border-bottom:1px solid rgba(127,180,255,.16);
-    color:var(--text);font-family:var(--mono);font-size:12px;
-    padding:4px 0;outline:none;letter-spacing:.5px;
-    caret-color:var(--blue2);
-}
-.text-inner input::placeholder{color:var(--muted)}
-.text-inner input:focus{border-bottom-color:rgba(127,180,255,.55)}
-.send-btn{
-    font-family:var(--mono);font-size:10px;letter-spacing:1.5px;
-    color:var(--blue2);
-    background:rgba(45,120,213,.14);
-    border:1px solid rgba(127,180,255,.22);
-    border-radius:6px;padding:4px 10px;
-    cursor:pointer;transition:background .15s,transform .12s;
-}
-.send-btn:hover{background:rgba(45,120,213,.22)}
-.send-btn:active{transform:scale(.94)}
 
-/* ═══ CHAT PANEL ═══ */
-.chat-panel{
-    position:absolute;
-    right:180px;top:40px;
-    width:0;min-height:360px;height:auto;
-    overflow:hidden;
-    display:flex;flex-direction:column;
-    border-radius:16px;opacity:0;
-    background:linear-gradient(180deg,rgba(9,13,23,.96),rgba(7,10,18,.98));
-    border:1px solid var(--line);
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.02),0 12px 28px rgba(0,0,0,.24);
-    transition:width .36s cubic-bezier(.4,0,.2,1),opacity .3s;
-    z-index:10;
+.utility:hover {
+    filter: brightness(1.12);
+    box-shadow: 0 0 20px currentColor;
 }
-.chat-panel.open{width:280px;opacity:1}
-.chat-panel-header{
-    font-family:var(--mono);font-size:9px;letter-spacing:3px;
-    color:var(--blue2);font-weight:700;text-transform:uppercase;
-    padding:11px 14px 9px;
-    border-bottom:1px solid rgba(95,119,153,.12);
-    flex-shrink:0;
+
+.utility:active {
+    transform: scale(.9);
 }
-.chat-list{
-    flex:1;overflow-y:auto;
-    display:flex;flex-direction:column;gap:6px;padding:8px;
+
+.kill-btn {
+    color: var(--red);
 }
-.chat-list::-webkit-scrollbar,.chat-active-area::-webkit-scrollbar{width:3px}
-.chat-list::-webkit-scrollbar-thumb,.chat-active-area::-webkit-scrollbar-thumb{
-    background:rgba(127,180,255,.16);border-radius:2px;
+
+.kill-btn::before,
+.kill-btn::after {
+    content: "";
+    position: absolute;
+    width: 12px;
+    height: 2px;
+    border-radius: 999px;
+    background: currentColor;
 }
-.convo-card{
-    background:rgba(14,20,33,.68);
-    border:1px solid rgba(95,119,153,.12);
-    border-radius:10px;padding:8px 10px;
-    cursor:pointer;
-    transition:background .15s,border-color .15s,transform .12s;
-    flex-shrink:0;
+
+.kill-btn::before {
+    transform: rotate(45deg);
 }
-.convo-card:hover{background:rgba(20,32,54,.76);border-color:rgba(127,180,255,.18);transform:translateY(-1px)}
-.convo-card.active{border-color:rgba(127,180,255,.26);background:rgba(20,36,62,.8)}
-.convo-line{font-family:var(--mono);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.5}
-.convo-line.boss-line{color:var(--blue2)}
-.convo-line.butler-line{color:var(--teal2)}
-.convo-line .lbl{color:var(--muted);margin-right:4px;font-size:9px}
-.convo-ts{font-family:var(--mono);font-size:8px;color:var(--muted);margin-top:3px;letter-spacing:1px}
-.chat-active-area{
-    border-top:1px solid rgba(95,119,153,.12);
-    padding:8px 10px;flex-shrink:0;
-    display:flex;flex-direction:column;gap:5px;
-    max-height:170px;overflow-y:auto;
+
+.kill-btn::after {
+    transform: rotate(-45deg);
 }
-.msg-row{display:flex;flex-direction:column}
-.msg-row.boss-row{align-items:flex-end}
-.msg-row.butler-row{align-items:flex-start}
-.msg-bubble{
-    max-width:92%;padding:7px 10px;border-radius:11px;
-    font-family:var(--head);font-size:12px;line-height:1.45;color:var(--text);
+
+.min-btn {
+    color: var(--yellow);
 }
-.msg-bubble.boss{background:rgba(19,44,82,.9);border:1px solid rgba(127,180,255,.16)}
-.msg-bubble.butler{background:rgba(10,16,26,.95);border:1px solid rgba(95,119,153,.14)}
-.msg-ts{font-family:var(--mono);font-size:8px;color:var(--muted);margin-top:2px;letter-spacing:1px}
+
+.min-btn::before {
+    content: "";
+    width: 12px;
+    height: 2px;
+    border-radius: 999px;
+    background: currentColor;
+}
+
+.drag-handle {
+    position: relative;
+    z-index: 3;
+    width: clamp(28px, 5vw, 42px);
+    height: calc(var(--button) + 6px);
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(122, 236, 255, .2);
+    border-radius: 999px;
+    background: rgba(6, 15, 30, .48);
+    cursor: grab;
+}
+
+.drag-handle:active {
+    cursor: grabbing;
+}
+
+.drag-handle span,
+.drag-handle::before,
+.drag-handle::after {
+    content: "";
+    width: 4px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--line-hot);
+    box-shadow: 0 0 10px var(--line-hot);
+}
+
+.drag-handle::before,
+.drag-handle::after {
+    position: absolute;
+}
+
+.drag-handle::before {
+    transform: translateY(-12px);
+}
+
+.drag-handle::after {
+    transform: translateY(12px);
+}
+
+.controls {
+    position: relative;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: clamp(6px, 1.45vw, 14px);
+    min-width: 0;
+    transition: gap .24s ease;
+}
+
+.control-btn {
+    --accent: var(--blue);
+    position: relative;
+    width: var(--button);
+    min-width: var(--button);
+    max-width: var(--button);
+    height: var(--button);
+    flex: 0 0 var(--button);
+    display: grid;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--accent) 54%, transparent);
+    border-radius: 18px;
+    background:
+        radial-gradient(circle at 50% 18%, color-mix(in srgb, var(--accent) 24%, transparent), transparent 52%),
+        linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.035));
+    box-shadow:
+        0 0 0 1px rgba(255,255,255,.05) inset,
+        0 0 18px color-mix(in srgb, var(--accent) 18%, transparent);
+    transition:
+        transform .18s cubic-bezier(.2,.9,.2,1.25),
+        width .24s ease,
+        flex-basis .24s ease,
+        min-width .24s ease,
+        max-width .24s ease,
+        padding .24s ease,
+        opacity .18s ease,
+        margin .24s ease,
+        border-color .18s ease,
+        box-shadow .2s ease,
+        background .2s ease;
+}
+
+body.has-focus-mode .controls {
+    gap: 0;
+}
+
+body.has-focus-mode .control-btn:not(.focus-btn) {
+    width: 0;
+    min-width: 0;
+    max-width: 0;
+    flex-basis: 0;
+    margin: 0;
+    padding: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    overflow: hidden;
+    color: transparent;
+    border-width: 0;
+}
+
+body.has-focus-mode .control-btn:not(.focus-btn) svg,
+body.has-focus-mode .control-btn:not(.focus-btn) .text-symbol {
+    width: 0;
+    opacity: 0;
+    visibility: hidden;
+}
+
+.control-btn::before {
+    content: "";
+    position: absolute;
+    inset: 7px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+    pointer-events: none;
+}
+
+.control-btn:hover {
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--accent) 80%, white 8%);
+    box-shadow: 0 0 26px color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.control-btn:active {
+    transform: scale(.94);
+}
+
+.control-btn svg {
+    position: relative;
+    z-index: 1;
+    width: var(--icon);
+    height: var(--icon);
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 2.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 7px color-mix(in srgb, var(--accent) 60%, transparent));
+}
+
+.mic-btn { --accent: var(--green); }
+.live-btn { --accent: var(--orange); }
+.text-btn { --accent: var(--purple); }
+.wake-btn { --accent: var(--blue); }
+
+.control-btn.active,
+.control-btn.listening {
+    background:
+        radial-gradient(circle at 50% 28%, color-mix(in srgb, var(--accent) 34%, transparent), transparent 58%),
+        linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,.05));
+    border-color: color-mix(in srgb, var(--accent) 92%, white 8%);
+    box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent) inset,
+        0 0 18px color-mix(in srgb, var(--accent) 46%, transparent),
+        0 0 38px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.text-symbol {
+    position: relative;
+    z-index: 1;
+    color: var(--purple);
+    font-family: var(--mono);
+    font-size: calc(var(--button) * .48);
+    font-weight: 700;
+    text-shadow: 0 0 10px rgba(216, 108, 255, .76);
+}
+
+.panel-wrap {
+    position: relative;
+    z-index: 2;
+    display: none;
+    min-width: 0;
+    height: calc(var(--button) + 10px);
+    opacity: 0;
+    transform: translateX(-12px);
+    pointer-events: none;
+    transition: opacity .22s ease, transform .28s cubic-bezier(.2,.9,.2,1);
+}
+
+body.has-focus-mode .panel-wrap {
+    display: block;
+}
+
+body.mode-wake .panel-wrap {
+    opacity: 1;
+    transform: translateX(0);
+    pointer-events: auto;
+}
+
+body.mode-live .panel-wrap,
+body.mode-text .panel-wrap,
+body.mode-mic .panel-wrap {
+    opacity: 1;
+    transform: translateX(0);
+    pointer-events: auto;
+}
+
+.mode-panel {
+    position: absolute;
+    inset: 0;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(74px, 1fr) max-content;
+    align-items: center;
+    gap: clamp(8px, 1.7vw, 16px);
+    padding: 0 clamp(12px, 2vw, 20px);
+    border: 1px solid color-mix(in srgb, var(--panel-accent) 38%, transparent);
+    border-radius: 18px;
+    background:
+        linear-gradient(90deg, color-mix(in srgb, var(--panel-accent) 17%, transparent), rgba(8, 16, 32, .54)),
+        rgba(4, 10, 22, .5);
+    box-shadow: inset 0 0 24px rgba(255, 255, 255, .035), 0 0 26px color-mix(in srgb, var(--panel-accent) 16%, transparent);
+    opacity: 0;
+    transform: translateY(8px) scale(.98);
+    transition: opacity .2s ease, transform .24s cubic-bezier(.2,.9,.2,1);
+}
+
+.live-panel,
+.mic-panel {
+    --panel-accent: var(--orange);
+}
+
+.mic-panel {
+    --panel-accent: var(--green);
+}
+
+.text-panel {
+    --panel-accent: var(--purple);
+    grid-template-columns: minmax(0, 1fr) max-content;
+}
+
+.wake-panel {
+    --panel-accent: var(--blue);
+}
+
+.wake-panel {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+body.mode-live .live-panel,
+body.mode-text .text-panel,
+body.mode-mic .mic-panel,
+body.mode-wake .wake-panel {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+.wave {
+    min-width: 0;
+    height: calc(var(--button) * .62);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: clamp(2px, .6vw, 5px);
+    overflow: hidden;
+}
+
+.wave span {
+    width: clamp(2px, .48vw, 4px);
+    height: 34%;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: var(--panel-accent);
+    box-shadow: 0 0 10px var(--panel-accent);
+    animation: wavePulse 820ms ease-in-out infinite;
+}
+
+.wave span:nth-child(2n) { animation-delay: -110ms; }
+.wave span:nth-child(3n) { animation-delay: -260ms; }
+.wave span:nth-child(4n) { animation-delay: -410ms; }
+
+.status-chip {
+    min-width: clamp(46px, 8vw, 92px);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: clamp(10px, 2.3vh, 14px);
+    letter-spacing: .14em;
+    text-align: right;
+    text-transform: uppercase;
+    text-shadow: 0 0 10px var(--panel-accent);
+}
+
+.wake-static {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.wake-title {
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: clamp(12px, 2.8vh, 18px);
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    text-shadow: 0 0 12px rgba(37, 217, 255, .72);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.wake-subtitle {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: clamp(8px, 1.8vh, 11px);
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.text-field {
+    min-width: 0;
+    width: 100%;
+    color: var(--text);
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--purple) 58%, transparent);
+    outline: none;
+    font-family: var(--mono);
+    font-size: clamp(13px, 3.5vh, 22px);
+    letter-spacing: .04em;
+    padding: 0 0 7px;
+    caret-color: var(--purple);
+    text-shadow: 0 0 8px rgba(216, 108, 255, .38);
+}
+
+.text-field::placeholder {
+    color: rgba(232, 247, 255, .48);
+}
+
+.send-btn {
+    width: clamp(34px, 7vh, 46px);
+    height: clamp(34px, 7vh, 46px);
+    display: grid;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--purple) 55%, transparent);
+    border-radius: 13px;
+    background: rgba(216, 108, 255, .12);
+    color: var(--purple);
+    font-family: var(--mono);
+    font-size: clamp(13px, 2.8vh, 18px);
+    box-shadow: 0 0 18px rgba(216, 108, 255, .18);
+    transition: transform .14s ease, background .18s ease, box-shadow .18s ease;
+}
+
+.send-btn:hover {
+    background: rgba(216, 108, 255, .2);
+    box-shadow: 0 0 28px rgba(216, 108, 255, .34);
+}
+
+.send-btn:active {
+    transform: scale(.92);
+}
+
+.wake-status {
+    position: absolute;
+    right: clamp(42px, 8vw, 66px);
+    bottom: clamp(7px, 1.3vh, 12px);
+    z-index: 4;
+    color: var(--blue);
+    font-family: var(--mono);
+    font-size: clamp(8px, 1.8vh, 11px);
+    letter-spacing: .18em;
+    text-shadow: 0 0 10px rgba(37, 217, 255, .72);
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity .2s ease, transform .2s ease;
+}
+
+body.wake-on .wake-status {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.resize-grip {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    width: 34px;
+    height: 34px;
+    cursor: nwse-resize;
+    pointer-events: none;
+}
+
+.resize-grip::before {
+    content: "";
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    width: 19px;
+    height: 19px;
+    background:
+        linear-gradient(135deg, transparent 53%, rgba(122, 236, 255, .75) 54%, rgba(122, 236, 255, .75) 60%, transparent 61%),
+        linear-gradient(135deg, transparent 34%, rgba(122, 236, 255, .48) 35%, rgba(122, 236, 255, .48) 41%, transparent 42%),
+        linear-gradient(135deg, transparent 16%, rgba(122, 236, 255, .28) 17%, rgba(122, 236, 255, .28) 23%, transparent 24%);
+    filter: drop-shadow(0 0 7px rgba(122, 236, 255, .7));
+}
+
+@keyframes wavePulse {
+    0%, 100% { height: 28%; opacity: .65; }
+    35% { height: 92%; opacity: 1; }
+    62% { height: 46%; opacity: .8; }
+}
+
+@media (max-width: 520px) {
+    .dock {
+        gap: 7px;
+        padding-left: 36px;
+        padding-right: 38px;
+    }
+
+    .status-chip {
+        display: none;
+    }
+
+    .mode-panel {
+        grid-template-columns: minmax(0, 1fr);
+        padding-inline: 10px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+    }
+}
 </style>
 </head>
 <body>
+<main class="widget-root" aria-label="Butler control widget">
+    <section class="dock" id="dock">
+        <div class="utility-stack">
+            <button class="utility kill-btn" id="kill-btn" type="button" onclick="doKill()" title="Kill" aria-label="Kill"></button>
+            <button class="utility min-btn" id="min-btn" type="button" onclick="doMinimize()" title="Minimize" aria-label="Minimize"></button>
+        </div>
 
-<!-- ═══ ORBITAL CLUSTER ═══ -->
-<div class="orbital" id="orbital">
+        <button class="drag-handle" id="drag-handle" type="button" onmousedown="startDrag(event)" title="Drag" aria-label="Drag widget">
+            <span></span>
+        </button>
 
-    <!-- Connector SVG lines -->
-    <svg class="connectors" viewBox="-200 -200 400 400">
-        <line class="conn-line" x1="0" y1="0" x2="50" y2="-95"/>
-        <line class="conn-line" x1="0" y1="0" x2="-100" y2="-55"/>
-        <line class="conn-line" x1="0" y1="0" x2="-80" y2="70"/>
-        <line class="conn-line" x1="0" y1="0" x2="-10" y2="115"/>
-    </svg>
+        <div class="controls" aria-label="Butler modes">
+            <button class="control-btn mic-btn" id="mic-btn" type="button" onclick="doOneShot()" title="One-shot mic" aria-label="One-shot mic">
+                <svg viewBox="0 0 64 64" aria-hidden="true">
+                    <path d="M32 39c6 0 10-4 10-10V17c0-6-4-10-10-10S22 11 22 17v12c0 6 4 10 10 10Z"></path>
+                    <path d="M15 29c0 10 7 18 17 18s17-8 17-18"></path>
+                    <path d="M32 47v9"></path>
+                    <path d="M22 56h20"></path>
+                </svg>
+            </button>
 
-    <!-- HUB (I) — Mic / One-shot talk -->
-    <div class="hub" id="hub-btn" onclick="handleHubClick(event)" oncontextmenu="toggleExpand(event)">
-        <div class="hub-ring"></div>
-        <svg viewBox="0 0 80 80">
-            <circle cx="40" cy="40" r="37" fill="rgba(28,24,60,.72)" stroke="#7f6ef0" stroke-width="1.5"/>
-            <circle cx="40" cy="40" r="28" fill="none" stroke="rgba(127,110,240,.16)" stroke-width="1"/>
-            <rect class="mic-body" x="33" y="19" width="14" height="25" rx="7" fill="#17132f" stroke="#b0a6ff" stroke-width="1.5"/>
-            <path d="M27 43 Q27 55 40 55 Q53 55 53 43" fill="none" stroke="#7f6ef0" stroke-width="1.5" stroke-linecap="round"/>
-            <line x1="40" y1="55" x2="40" y2="61" stroke="#7f6ef0" stroke-width="1.5" stroke-linecap="round"/>
-            <line x1="34" y1="61" x2="46" y2="61" stroke="#7f6ef0" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-    </div>
+            <button class="control-btn live-btn" id="live-btn" type="button" onclick="toggleLive()" title="Live talkback" aria-label="Live talkback">
+                <svg viewBox="0 0 64 64" aria-hidden="true">
+                    <path d="M8 34v-4"></path>
+                    <path d="M15 43V21"></path>
+                    <path d="M22 51V13"></path>
+                    <path d="M29 41V23"></path>
+                    <path d="M36 49V15"></path>
+                    <path d="M43 40V24"></path>
+                    <path d="M50 45V19"></path>
+                    <path d="M57 35v-6"></path>
+                </svg>
+            </button>
 
-    <!-- SAT II — Live Talk -->
-    <div class="sat sat-ii" id="live-btn" onclick="toggleLive()">
-        <svg viewBox="0 0 80 80">
-            <circle cx="40" cy="40" r="33" fill="none" stroke="#d85c5c" stroke-width="1.5"/>
-            <circle cx="40" cy="40" r="23" fill="none" stroke="rgba(216,92,92,.18)" stroke-width="1"/>
-            <circle cx="40" cy="40" r="14" fill="none" stroke="rgba(216,92,92,.24)" stroke-width="1"/>
-            <circle class="live-dot" cx="40" cy="40" r="4" fill="#d85c5c"/>
-            <text x="40" y="70" text-anchor="middle" font-family="'Share Tech Mono',monospace" font-size="7" fill="#7a3535" letter-spacing="2">LIVE</text>
-        </svg>
-    </div>
+            <button class="control-btn text-btn" id="text-btn" type="button" onclick="toggleText()" title="Text input" aria-label="Text input">
+                <span class="text-symbol" aria-hidden="true">T</span>
+            </button>
 
-    <!-- SAT III — Text Input -->
-    <div class="sat sat-iii" id="text-btn" onclick="toggleText()">
-        <svg viewBox="0 0 80 80">
-            <circle cx="40" cy="40" r="33" fill="none" stroke="#2d78d5" stroke-width="1.5"/>
-            <rect x="21" y="33" width="38" height="14" rx="3" fill="none" stroke="#2d78d5" stroke-width="1.5"/>
-            <line x1="26" y1="40" x2="41" y2="40" stroke="#7fb4ff" stroke-width="1.5" stroke-linecap="round"/>
-            <line class="tb-cursor" x1="43" y1="36" x2="43" y2="44" stroke="#7fb4ff" stroke-width="1.5" stroke-linecap="round" opacity="0"/>
-        </svg>
-    </div>
+            <button class="control-btn wake-btn" id="wake-btn" type="button" onclick="toggleWake()" title="Wake word" aria-label="Wake word">
+                <svg viewBox="0 0 64 64" aria-hidden="true">
+                    <path d="M23 49c-5-6-7-14-5-22 2-10 9-17 19-17 8 0 15 6 15 15 0 7-4 12-10 15-5 3-7 5-7 9 0 4-3 7-7 7-2 0-4-1-5-2"></path>
+                    <path d="M30 28c2-4 7-5 10-2 4 4 1 9-5 12"></path>
+                    <path d="M15 17c-4 6-5 15-1 23"></path>
+                    <path d="M8 13c-6 10-6 22 0 33"></path>
+                    <path d="M43 14c3 2 5 6 5 10"></path>
+                </svg>
+            </button>
+        </div>
 
-    <!-- SAT IV — Wake Word -->
-    <div class="sat sat-iv" id="wake-btn" onclick="toggleWake()">
-        <svg viewBox="0 0 80 80">
-            <circle class="ring" cx="40" cy="40" r="33" fill="none" stroke="#2d78d5" stroke-width="1.5"/>
-            <circle cx="40" cy="40" r="22" fill="none" stroke="rgba(45,120,213,.16)" stroke-width="1"/>
-            <circle class="pulse" cx="40" cy="40" r="12" fill="none" stroke="#78e3c2" stroke-width="1.2" opacity="0"/>
-            <path d="M26 40 Q29 32 32 40 Q35 48 38 40 Q41 32 44 40 Q47 48 50 40 Q53 32 56 40" fill="none" stroke="#7fb4ff" stroke-width="1.6" stroke-linecap="round" opacity=".72"/>
-            <circle class="core" cx="40" cy="40" r="4.5" fill="#2d78d5"/>
-        </svg>
-    </div>
+        <div class="panel-wrap" id="panel-wrap" aria-live="polite">
+            <div class="mode-panel live-panel" aria-hidden="true">
+                <div class="wave" aria-hidden="true">
+                    <span></span><span></span><span></span><span></span><span></span><span></span>
+                    <span></span><span></span><span></span><span></span><span></span><span></span>
+                    <span></span><span></span><span></span><span></span>
+                </div>
+                <div class="status-chip">Live</div>
+            </div>
 
-    <!-- SAT V — Chat Panel -->
-    <div class="sat sat-v" id="chat-btn" onclick="toggleChat()">
-        <svg viewBox="0 0 80 80">
-            <circle cx="40" cy="40" r="33" fill="none" stroke="#23b98d" stroke-width="1.5"/>
-            <rect class="chat-bg" x="18" y="21" width="44" height="29" rx="4" fill="#081712" stroke="#78e3c2" stroke-width="1.5"/>
-            <line x1="24" y1="30" x2="40" y2="30" stroke="#78e3c2" stroke-width="1.5" stroke-linecap="round" opacity=".88"/>
-            <line x1="24" y1="36" x2="56" y2="36" stroke="#78e3c2" stroke-width="1" stroke-linecap="round" opacity=".48"/>
-            <line x1="24" y1="42" x2="48" y2="42" stroke="#78e3c2" stroke-width="1" stroke-linecap="round" opacity=".28"/>
-            <polygon points="28,50 35,50 31.5,57" fill="#23b98d"/>
-        </svg>
-    </div>
+            <div class="mode-panel mic-panel" aria-hidden="true">
+                <div class="wave" aria-hidden="true">
+                    <span></span><span></span><span></span><span></span><span></span><span></span>
+                    <span></span><span></span><span></span><span></span>
+                </div>
+                <div class="status-chip">Once</div>
+            </div>
 
-    <!-- Window dots -->
-    <div class="dot dot-kill" onclick="doKill()" title="Kill"></div>
-    <div class="dot dot-min" onclick="doMinimize()" title="Minimize"></div>
-    <div class="drag-grip" id="drag-handle" onmousedown="startDrag(event)" title="Drag">
-        <span></span><span></span>
-    </div>
-</div>
+            <div class="mode-panel text-panel" aria-hidden="true">
+                <input class="text-field" id="cmd-input" type="text" placeholder="Enter command" onkeydown="handleEnter(event)" autocomplete="off" spellcheck="false" aria-label="Text command">
+                <button class="send-btn" type="button" onclick="submitText()" title="Send" aria-label="Send text">></button>
+            </div>
 
-<!-- ═══ TEXT BAR ═══ -->
-<div class="text-bar" id="text-bar">
-    <div class="text-inner">
-        <input type="text" id="cmd-input" placeholder="Awaiting command..." onkeydown="handleEnter(event)" autocomplete="off" spellcheck="false"/>
-        <div class="send-btn" onclick="submitText()">SEND</div>
-    </div>
-</div>
+            <div class="mode-panel wake-panel" aria-hidden="true">
+                <div class="wake-static">
+                    <div class="wake-title">Wake Word Active</div>
+                    <div class="wake-subtitle">Passive listener armed</div>
+                </div>
+            </div>
+        </div>
 
-<!-- ═══ CHAT PANEL ═══ -->
-<div class="chat-panel" id="chat-panel">
-    <div class="chat-panel-header">Chats</div>
-    <div class="chat-list" id="chat-list"></div>
-    <div class="chat-active-area" id="chat-active"></div>
-</div>
+        <div class="wake-status" id="wake-status">WAKE ONLINE</div>
+        <div class="resize-grip" id="resize-grip" aria-hidden="true"></div>
+    </section>
+</main>
 
 <script>
-const S = {wake:false,text:false,live:false,chat:false,recording:false,expanded:false};
+const S = { wake: false, text: false, live: false, recording: false };
 const sessions = [];
 let activeSession = null;
-let api = null;
 let pyQueue = [];
+let micTimer = null;
 
-function py(method,...args){
-    if(window.api&&window.api[method]){window.api[method](...args)}
-    else{pyQueue.push({method,args})}
+function py(method, ...args) {
+    if (window.api && window.api[method]) {
+        window.api[method](...args);
+        return;
+    }
+    pyQueue.push({ method, args });
 }
 
-function fmtTime(){return new Date().toTimeString().slice(0,8)}
-function setStatus(msg){}
-function stopBubble(e){e.stopPropagation()}
-function trunc(s,n){return s&&s.length>n?s.slice(0,n)+'...':(s||'-')}
+function domRectFor(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    return {
+        x: rect.left,
+        y: rect.top,
+        w: rect.width,
+        h: rect.height,
+    };
+}
 
-// ── DRAG ──
-function startDrag(e){
-    e.preventDefault();e.stopPropagation();
+function syncHitRegions() {
+    const regions = {
+        dock: domRectFor('dock'),
+        drag: domRectFor('drag-handle'),
+        resize: domRectFor('resize-grip'),
+    };
+    py('update_hit_regions', JSON.stringify(regions));
+}
+
+function scheduleHitRegionSync() {
+    requestAnimationFrame(() => {
+        syncHitRegions();
+        setTimeout(syncHitRegions, 260);
+    });
+}
+
+function setMode(mode) {
+    document.body.classList.toggle('mode-live', mode === 'live');
+    document.body.classList.toggle('mode-text', mode === 'text');
+    document.body.classList.toggle('mode-mic', mode === 'mic');
+    document.body.classList.toggle('mode-wake', mode === 'wake');
+    document.body.classList.toggle('has-focus-mode', Boolean(mode));
+    document.querySelectorAll('.control-btn').forEach(btn => btn.classList.remove('focus-btn'));
+    const focusMap = {
+        live: 'live-btn',
+        text: 'text-btn',
+        mic: 'mic-btn',
+        wake: 'wake-btn',
+    };
+    const focusId = focusMap[mode];
+    if (focusId) document.getElementById(focusId).classList.add('focus-btn');
+    scheduleHitRegionSync();
+}
+
+function startDrag(e) {
+    e.preventDefault();
+    e.stopPropagation();
     py('start_drag');
 }
 
-// ── HUB CLICK ──
-function handleHubClick(e){
-    e.preventDefault();
-    if(S.live){stopLive()}
-    else{doOneShot()}
-}
+function doOneShot() {
+    if (S.live) stopLive();
+    if (S.recording) return;
+    closeText(true);
 
-function toggleExpand(e){
-    e.preventDefault();
-    S.expanded=!S.expanded;
-    document.getElementById('orbital').classList.toggle('expanded',S.expanded);
-    py('on_expand_toggle',S.expanded);
-    setTimeout(syncHitRegions,400);
-}
-
-// ── ONE-SHOT MIC ──
-function doOneShot(){
-    if(S.recording)return;
-    S.recording=true;
-    const hub=document.getElementById('hub-btn');
-    hub.classList.add('recording');
+    S.recording = true;
+    const mic = document.getElementById('mic-btn');
+    mic.classList.add('listening');
+    setMode('mic');
     py('on_mic_click');
-    setTimeout(()=>{
-        if(!S.live){hub.classList.remove('recording');S.recording=false}
-    },1500);
+
+    clearTimeout(micTimer);
+    micTimer = setTimeout(() => {
+        S.recording = false;
+        mic.classList.remove('listening');
+        if (!S.live && !S.text) setMode(S.wake ? 'wake' : '');
+    }, 1600);
 }
 
-// ── LIVE TALK (II) ──
-function toggleLive(){S.live?stopLive():startLive()}
-function startLive(){
-    S.live=true;S.recording=true;
-    document.getElementById('hub-btn').classList.add('st-live-mic');
-    document.getElementById('hub-btn').classList.remove('recording');
-    document.getElementById('live-btn').classList.add('st-live');
-    py('on_live_toggle',true);
-}
-function stopLive(){
-    S.live=false;S.recording=false;
-    document.getElementById('hub-btn').classList.remove('st-live-mic');
-    document.getElementById('hub-btn').classList.remove('recording');
-    document.getElementById('live-btn').classList.remove('st-live');
-    py('on_live_toggle',false);
+function toggleLive() {
+    S.live ? stopLive() : startLive();
 }
 
-// ── TEXT INPUT (III) ──
-function toggleText(){
-    S.text=!S.text;
-    document.getElementById('text-bar').classList.toggle('open',S.text);
-    document.getElementById('text-btn').classList.toggle('st-text',S.text);
-    if(S.text)setTimeout(()=>document.getElementById('cmd-input').focus(),310);
-    py('on_text_toggle',S.text);
-    setTimeout(syncHitRegions,350);
+function startLive() {
+    closeText(true);
+    S.live = true;
+    S.recording = true;
+    document.getElementById('live-btn').classList.add('active');
+    document.getElementById('mic-btn').classList.remove('listening');
+    setMode('live');
+    py('on_live_toggle', true);
 }
 
-// ── WAKE WORD (IV) ──
-function toggleWake(){
-    S.wake=!S.wake;
-    document.getElementById('wake-btn').classList.toggle('st-wake',S.wake);
-    py('on_wake_toggle',S.wake);
+function stopLive() {
+    S.live = false;
+    S.recording = false;
+    document.getElementById('live-btn').classList.remove('active');
+    setMode(S.text ? 'text' : (S.wake ? 'wake' : ''));
+    py('on_live_toggle', false);
 }
 
-// ── CHAT PANEL (V) ──
-function toggleChat(){
-    S.chat=!S.chat;
-    document.getElementById('chat-panel').classList.toggle('open',S.chat);
-    document.getElementById('chat-btn').classList.toggle('st-chat',S.chat);
-    py('on_chat_toggle',S.chat);
-    setTimeout(syncHitRegions,400);
+function toggleText() {
+    S.text ? closeText(true) : openText();
 }
 
-function doMinimize(){py('minimize')}
-function doKill(){py('kill')}
-function handleEnter(e){if(e.key==='Enter')submitText()}
-
-function submitText(){
-    const inp=document.getElementById('cmd-input');
-    const text=inp.value.trim();
-    if(!text)return;
-    inp.value='';
-    window.appendLog('user',text);
-    py('on_text_submit',text);
+function openText() {
+    if (S.live) stopLive();
+    S.text = true;
+    document.getElementById('text-btn').classList.add('active');
+    setMode('text');
+    py('on_text_toggle', true);
+    setTimeout(() => document.getElementById('cmd-input').focus(), 240);
 }
 
-// ── SESSIONS ──
-function newSession(){
-    const sess={id:Date.now(),ts:fmtTime(),messages:[]};
-    sessions.unshift(sess);activeSession=sess;return sess;
-}
-function selectSession(sess){activeSession=sess;renderChatList();renderActive()}
-
-function renderChatList(){
-    const list=document.getElementById('chat-list');list.innerHTML='';
-    sessions.forEach(sess=>{
-        const msgs=sess.messages;
-        const bossMsg=[...msgs].reverse().find(m=>m.role==='user')||null;
-        const butlerMsg=[...msgs].reverse().find(m=>m.role==='butler')||null;
-        const card=document.createElement('div');
-        card.className='convo-card'+(sess===activeSession?' active':'');
-        card.onclick=()=>selectSession(sess);
-        card.innerHTML=
-            `<div class="convo-line boss-line"><span class="lbl">BOSS:</span>${trunc(bossMsg?bossMsg.text:'-',26)}</div>`+
-            `<div class="convo-line butler-line"><span class="lbl">BUTLER:</span>${trunc(butlerMsg?butlerMsg.text:'-',24)}</div>`+
-            `<div class="convo-ts">${sess.ts}</div>`;
-        list.appendChild(card);
-    });
+function closeText(notify) {
+    if (!S.text) return;
+    S.text = false;
+    document.getElementById('text-btn').classList.remove('active');
+    setMode(S.live ? 'live' : (S.wake ? 'wake' : ''));
+    if (notify) py('on_text_toggle', false);
 }
 
-function renderActive(){
-    const area=document.getElementById('chat-active');area.innerHTML='';
-    if(!activeSession)return;
-    activeSession.messages.forEach(msg=>{
-        const isUser=msg.role==='user';
-        const row=document.createElement('div');
-        row.className='msg-row '+(isUser?'boss-row':'butler-row');
-        const bubble=document.createElement('div');
-        bubble.className='msg-bubble '+(isUser?'boss':'butler');
-        bubble.textContent=msg.text;
-        const ts=document.createElement('div');
-        ts.className='msg-ts';ts.textContent=msg.ts;
-        row.appendChild(bubble);row.appendChild(ts);area.appendChild(row);
-    });
-    area.scrollTop=area.scrollHeight;
+function toggleWake() {
+    S.wake = !S.wake;
+    document.body.classList.toggle('wake-on', S.wake);
+    document.getElementById('wake-btn').classList.toggle('active', S.wake);
+    setMode(S.wake ? 'wake' : '');
+    py('on_wake_toggle', S.wake);
 }
 
-// ── PYTHON API ──
-window.updateStatus=function(status){
-    setStatus(status);
-    if(!S.live){
-        const hub=document.getElementById('hub-btn');
-        const busy=['thinking','processing','generating','recording'].some(k=>status.toLowerCase().includes(k));
-        const done=['online','ready','standby'].some(k=>status.toLowerCase().includes(k));
-        hub.classList.toggle('recording',busy);
-        if(done){hub.classList.remove('recording');S.recording=false}
+function doMinimize() {
+    py('minimize');
+}
+
+function doKill() {
+    py('kill');
+}
+
+function handleEnter(e) {
+    if (e.key === 'Enter') submitText();
+}
+
+function submitText() {
+    const input = document.getElementById('cmd-input');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    window.appendLog('user', text);
+    py('on_text_submit', text);
+}
+
+function fmtTime() {
+    return new Date().toTimeString().slice(0, 8);
+}
+
+function newSession() {
+    const sess = { id: Date.now(), ts: fmtTime(), messages: [] };
+    sessions.unshift(sess);
+    activeSession = sess;
+    return sess;
+}
+
+window.updateStatus = function(status) {
+    const msg = String(status || '').toLowerCase();
+    const busy = ['thinking', 'processing', 'generating', 'recording', 'listening'].some(k => msg.includes(k));
+    const done = ['online', 'ready', 'standby', 'done'].some(k => msg.includes(k));
+    const mic = document.getElementById('mic-btn');
+
+    if (!S.live && busy) {
+        S.recording = true;
+        mic.classList.add('listening');
+        setMode('mic');
+    }
+
+    if (!S.live && done) {
+        S.recording = false;
+        mic.classList.remove('listening');
+        if (!S.text) setMode(S.wake ? 'wake' : '');
     }
 };
 
-window.appendLog=function(role,text){
-    if(!activeSession)newSession();
-    activeSession.messages.push({role,text,ts:fmtTime()});
-    renderChatList();renderActive();
+window.appendLog = function(role, text) {
+    if (!activeSession) newSession();
+    activeSession.messages.push({ role, text, ts: fmtTime() });
 };
 
-// ── INIT ──
-window.addEventListener('load',()=>{
-    function initBridge(){
-        if(typeof QWebChannel!=='undefined'&&typeof qt!=='undefined'&&qt.webChannelTransport){
-            new QWebChannel(qt.webChannelTransport,function(channel){
-                window.api=channel.objects.api;api=window.api;
-                while(pyQueue.length>0){const cmd=pyQueue.shift();py(cmd.method,...cmd.args)}
+window.addEventListener('load', () => {
+    function initBridge() {
+        if (typeof QWebChannel !== 'undefined' && typeof qt !== 'undefined' && qt.webChannelTransport) {
+            new QWebChannel(qt.webChannelTransport, function(channel) {
+                window.api = channel.objects.api;
+                while (pyQueue.length > 0) {
+                    const cmd = pyQueue.shift();
+                    py(cmd.method, ...cmd.args);
+                }
                 newSession();
+                scheduleHitRegionSync();
             });
-        }else{setTimeout(initBridge,100)}
+            return;
+        }
+        setTimeout(initBridge, 100);
     }
     initBridge();
 });
 
-// ── HIT REGION SYNC ──
-function syncHitRegions(){
-    const ids=['hub-btn','live-btn','text-btn','wake-btn','chat-btn',
-               'dot-kill','dot-min','drag-handle','text-bar','chat-panel'];
-    const rects=[];
-    ids.forEach(id=>{
-        const el=document.getElementById(id);
-        if(!el)return;
-        const r=el.getBoundingClientRect();
-        if(r.width<1||r.height<1)return;
-        // skip invisible satellites
-        const style=window.getComputedStyle(el);
-        if(parseFloat(style.opacity)<0.1)return;
-        rects.push({x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)});
-    });
-    py('sync_hit_regions',JSON.stringify(rects));
-}
-
-document.addEventListener('contextmenu',e=>{
-    if(!e.target.closest('.hub'))e.preventDefault();
-});
-
-// Initial sync after layout settles
-setTimeout(syncHitRegions,500);
+window.addEventListener('resize', scheduleHitRegionSync);
+document.addEventListener('contextmenu', e => e.preventDefault());
 </script>
 </body>
 </html>

@@ -14,8 +14,10 @@ class SyncArgs(BaseModel):
     paths: list[str] | None = Field(default=None, description="Optional specific paths to sync incrementally.")
 
 
-TEXT_EXTS = {".md", ".txt"}
+TEXT_EXTS = {".md", ".txt", ".csv"}
 PDF_EXTS = {".pdf"}
+OFFICE_EXTS = {".docx", ".xlsx", ".pptx"}
+ALL_INDEXABLE = TEXT_EXTS | PDF_EXTS | OFFICE_EXTS
 
 
 def _read_pdf_text(path: Path) -> str:
@@ -33,12 +35,48 @@ def _read_pdf_text(path: Path) -> str:
     return "\n".join(pages).strip()
 
 
+def _read_office_text(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".docx":
+        from docx import Document
+        doc = Document(str(path))
+        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    if suffix == ".xlsx":
+        from openpyxl import load_workbook
+        wb = load_workbook(str(path), read_only=True, data_only=True)
+        rows: list[str] = []
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                if any(cells):
+                    rows.append(" | ".join(cells))
+        wb.close()
+        return "\n".join(rows)
+    if suffix == ".pptx":
+        from pptx import Presentation
+        prs = Presentation(str(path))
+        texts: list[str] = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        if para.text.strip():
+                            texts.append(para.text.strip())
+        return "\n".join(texts)
+    return ""
+
+
 def _extract_index_text(path: Path) -> tuple[str | None, bool]:
     suffix = path.suffix.lower()
     if suffix in TEXT_EXTS:
         return path.read_text(encoding="utf-8", errors="replace"), False
     if suffix in PDF_EXTS:
         return _read_pdf_text(path), True
+    if suffix in OFFICE_EXTS:
+        try:
+            return _read_office_text(path), False
+        except Exception:
+            return path.name, False  # At least index the filename
     return None, False
 
 
@@ -70,7 +108,7 @@ def _index_sync(ctx: ToolContext, args: SyncArgs) -> dict[str, Any]:
         if not path.is_file():
             continue
         scanned += 1
-        if path.suffix.lower() not in TEXT_EXTS | PDF_EXTS:
+        if path.suffix.lower() not in ALL_INDEXABLE:
             skipped_binary += 1
             continue
         size = path.stat().st_size
@@ -95,13 +133,13 @@ def _index_sync(ctx: ToolContext, args: SyncArgs) -> dict[str, Any]:
             (str(path), content),
         )
         
-        if ctx.memory:
-            chunks = [content[i:i+1000] for i in range(0, len(content), 800)]
-            for i, chunk in enumerate(chunks):
-                ctx.memory.add(
-                    chunk, 
-                    metadata={"path": str(path), "type": "file", "chunk_idx": i}
-                )
+        # if ctx.memory:
+        #     chunks = [content[i:i+1000] for i in range(0, len(content), 800)]
+        #     for i, chunk in enumerate(chunks):
+        #         ctx.memory.add(
+        #             chunk, 
+        #             metadata={"path": str(path), "type": "file", "chunk_idx": i}
+        #         )
         
         indexed += 1
 

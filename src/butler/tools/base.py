@@ -27,6 +27,7 @@ class ToolContext:
     db: ButlerDB
     sandbox: PathSandbox
     memory: MemoryStore | None = None
+    registry: Any = None
 
 
 @dataclass(frozen=True)

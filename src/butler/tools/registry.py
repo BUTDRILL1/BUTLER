@@ -12,16 +12,19 @@ from butler.tools.base import Tool, ToolCallRecord, ToolContext, ToolError, now_
 if TYPE_CHECKING:
     from butler.agent.memory import MemoryStore
 from butler.tools.impl import files as files_tools
-from butler.tools.impl import index as index_tools
 from butler.tools.impl import notes as notes_tools
 from butler.tools.impl import system as system_tools
 from butler.tools.impl import weather as weather_tools
 from butler.tools.impl import web as web_tools
-from butler.tools.impl import os_control as os_tools
-from butler.tools.impl import spotify_control as spotify_tools
+from butler.tools.impl import reminders as reminders_tools
+from butler.tools.impl import github as github_tools
 
 logger = logging.getLogger(__name__)
 
+
+import importlib.util
+from pathlib import Path
+from butler.paths import butler_home_dir
 
 @dataclass
 class ToolRegistry:
@@ -43,6 +46,10 @@ class ToolRegistry:
             for t in self.tools.values()
         ]
 
+    def reload(self) -> None:
+        self.tools = _load_all_tools(self.config, self.db, self.memory)
+        self.__post_init__()
+
     def describe(self) -> list[dict[str, Any]]:
         return self._cached_description
 
@@ -50,7 +57,7 @@ class ToolRegistry:
         if tool_name not in self.tools:
             raise ToolError(f"Unknown tool: {tool_name}")
         tool = self.tools[tool_name]
-        ctx = ToolContext(config=self.config, db=self.db, sandbox=self.sandbox, memory=self.memory)
+        ctx = ToolContext(config=self.config, db=self.db, sandbox=self.sandbox, memory=self.memory, registry=self)
 
         started = now_ms()
         status = "ok"
@@ -86,28 +93,45 @@ class ToolRegistry:
                 )
 
 
-def build_default_tool_registry(config: ButlerConfig, db: ButlerDB, memory: MemoryStore) -> ToolRegistry:
-    sandbox = PathSandbox.from_strings(config.allowed_roots)
+def _load_all_tools(config: ButlerConfig, db: ButlerDB, memory: MemoryStore) -> dict[str, Tool]:
+    from butler.tools.impl import skills as skills_tools
     tools: dict[str, Tool] = {}
 
     def add(tool: Tool) -> None:
         tools[tool.name] = tool
 
-    for t in system_tools.build():
-        add(t)
-    for t in files_tools.build():
-        add(t)
-    for t in notes_tools.build():
-        add(t)
-    for t in index_tools.build():
-        add(t)
-    for t in weather_tools.build():
-        add(t)
-    for t in web_tools.build():
-        add(t)
-    for t in os_tools.build():
-        add(t)
-    for t in spotify_tools.build():
-        add(t)
+    for t in system_tools.build(): add(t)
+    for t in files_tools.build(): add(t)
+    for t in notes_tools.build(): add(t)
+    for t in weather_tools.build(): add(t)
+    for t in web_tools.build(): add(t)
+    for t in reminders_tools.build(): add(t)
+    
+    for t in github_tools.TOOLS: add(t)
+    
+    try:
+        for t in skills_tools.build(): add(t)
+    except Exception as e:
+        logger.error("Failed to load skills_tools: %s", e)
 
+    skills_dir = butler_home_dir() / "skills"
+    if skills_dir.exists():
+        for py_file in skills_dir.glob("*.py"):
+            try:
+                spec = importlib.util.spec_from_file_location(f"butler.skills.{py_file.stem}", py_file)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    if hasattr(module, "build"):
+                        for t in module.build():
+                            add(t)
+            except Exception as e:
+                logger.error("Failed to load dynamic skill %s: %s", py_file, e)
+                
+    return tools
+
+
+def build_default_tool_registry(config: ButlerConfig, db: ButlerDB, memory: MemoryStore) -> ToolRegistry:
+    sandbox = PathSandbox.from_strings(config.allowed_roots)
+    tools = _load_all_tools(config, db, memory)
     return ToolRegistry(config=config, db=db, sandbox=sandbox, memory=memory, tools=tools)
