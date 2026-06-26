@@ -16,6 +16,8 @@ from butler.tools.impl import notes as notes_tools
 from butler.tools.impl import system as system_tools
 from butler.tools.impl import weather as weather_tools
 from butler.tools.impl import web as web_tools
+from butler.tools.impl import spotify_control
+from butler.tools.impl import os_control
 from butler.tools.impl import reminders as reminders_tools
 from butler.tools.impl import github as github_tools
 
@@ -106,6 +108,8 @@ def _load_all_tools(config: ButlerConfig, db: ButlerDB, memory: MemoryStore) -> 
     for t in weather_tools.build(): add(t)
     for t in web_tools.build(): add(t)
     for t in reminders_tools.build(): add(t)
+    for t in spotify_control.build(): add(t)
+    for t in os_control.build(): add(t)
     
     for t in github_tools.TOOLS: add(t)
     

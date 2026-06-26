@@ -156,9 +156,7 @@ class handler(BaseHTTPRequestHandler):
             else:
                 prov = OllamaProvider(base_url=config.ollama_url, model=config.model)
 
-            from butler.paths import butler_home_dir
-            mem_db = butler_home_dir() / "memory.db"
-            memory = MemoryStore(str(mem_db), prov)
+            memory = MemoryStore(db, prov)
             
             tools = build_default_tool_registry(config, db, memory)
 
