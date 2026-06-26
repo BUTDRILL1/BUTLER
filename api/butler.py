@@ -16,6 +16,10 @@ from butler.agent.loop import AgentRuntime
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/api/cron":
+            self.handle_cron()
+            return
+
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
@@ -23,6 +27,44 @@ class handler(BaseHTTPRequestHandler):
             "status": "online",
             "message": "BUTLER is online and listening. Please send POST requests with {\"query\": \"...\"} to interact."
         }).encode('utf-8'))
+
+    def handle_cron(self):
+        import requests
+        try:
+            config = load_config()
+            db = ButlerDB.open(config)
+            
+            chat_id_db = db.get_property("telegram_chat_id")
+            chat_id_to_use = config.telegram_chat_id or chat_id_db
+
+            due = db.get_pending_reminders()
+            fired_count = 0
+            if due and config.telegram_bot_token and chat_id_to_use:
+                tg_url = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendMessage"
+                for r in due:
+                    try:
+                        text = f"🔔 *REMINDER:* {r['message']}"
+                        requests.post(tg_url, json={"chat_id": chat_id_to_use, "text": text, "parse_mode": "Markdown"})
+                        
+                        recurrence = r.get("recurrence_minutes")
+                        if recurrence:
+                            db.reschedule_recurring_reminder(r["id"], recurrence)
+                        else:
+                            db.mark_reminder_sent(r["id"])
+                        fired_count += 1
+                    except Exception as e:
+                        print(f"Failed to fire reminder {r['id']}: {e}")
+
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "status": "cron_executed",
+                "reminders_fired": fired_count
+            }).encode('utf-8'))
+        except Exception as e:
+            self.send_error_response(f"Cron error: {str(e)}")
+
 
     def do_POST(self):
         try:
@@ -94,6 +136,7 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             config = load_config()
+            db = ButlerDB.open(config)
             
             # Security check for Telegram
             if is_telegram and config.telegram_allowed_user:
@@ -102,7 +145,8 @@ class handler(BaseHTTPRequestHandler):
                     self.send_response(200)
                     self.end_headers()
                     return
-            db = ButlerDB.open(config)
+                # Store the authorized chat_id in the DB for Cron jobs to use
+                db.set_property("telegram_chat_id", str(chat_id))
 
             from butler.agent.provider import AnthropicProvider, GeminiProvider, NvidiaProvider, OllamaProvider
             if config.provider == "gemini":
