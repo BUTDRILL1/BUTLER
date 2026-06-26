@@ -147,7 +147,8 @@ class ButlerConfig(BaseModel):
 
     telegram_bot_token: str = Field(default_factory=lambda: os.getenv("BUTLER_TELEGRAM_BOT_TOKEN", ""))
     telegram_allowed_user: str = Field(default_factory=lambda: os.getenv("BUTLER_TELEGRAM_ALLOWED_USER", ""))
-    telegram_chat_id: str | None = Field(default_factory=lambda: os.getenv("BUTLER_TELEGRAM_CHAT_ID", None))
+    telegram_chat_id: str | int | None = Field(default_factory=lambda: os.getenv("BUTLER_TELEGRAM_CHAT_ID", None))
+    timezone: str = Field(default_factory=lambda: os.getenv("BUTLER_TIMEZONE", "Asia/Kolkata"))
 
     github_token: str = Field(default_factory=lambda: os.getenv("BUTLER_GITHUB_TOKEN", ""))
 
@@ -181,6 +182,7 @@ def load_config() -> ButlerConfig:
         ("telegram_bot_token", "BUTLER_TELEGRAM_BOT_TOKEN"),
         ("telegram_allowed_user", "BUTLER_TELEGRAM_ALLOWED_USER"),
         ("telegram_chat_id", "BUTLER_TELEGRAM_CHAT_ID"),
+        ("timezone", "BUTLER_TIMEZONE"),
         ("model", "BUTLER_MODEL"),
         ("chat_model", "BUTLER_CHAT_MODEL"),
         ("vision_model", "BUTLER_VISION_MODEL"),
