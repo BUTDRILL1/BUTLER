@@ -742,6 +742,7 @@ Do not use markdown blocks, just raw JSON.
                 self.app.add_handler(CallbackQueryHandler(self._handle_callback_query))
 
                 logger.info(f"Bot daemon connecting to Telegram (attempt {attempt}/{max_retries})...")
+                self.app.run_polling(drop_pending_updates=True, close_loop=False, stop_signals=[])
                 return  # Clean exit, no retry needed
 
             except Exception as e:
