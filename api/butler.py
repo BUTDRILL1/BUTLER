@@ -35,9 +35,54 @@ class handler(BaseHTTPRequestHandler):
             chat_id = None
             if "message" in body and "chat" in body.get("message", {}):
                 is_telegram = True
-                query = body["message"].get("text", "")
                 chat_id = body["message"]["chat"]["id"]
                 username = body["message"].get("from", {}).get("username", "")
+                
+                # Check for photo
+                if "photo" in body["message"]:
+                    import requests
+                    import base64
+                    config = load_config()
+                    token = config.telegram_bot_token
+                    caption = body["message"].get("caption", "")
+                    # Get the highest resolution photo (last in the array)
+                    photo_id = body["message"]["photo"][-1]["file_id"]
+                    
+                    # Fetch file path from Telegram
+                    file_resp = requests.get(f"https://api.telegram.org/bot{token}/getFile?file_id={photo_id}").json()
+                    if file_resp.get("ok"):
+                        file_path = file_resp["result"]["file_path"]
+                        # Download the image bytes
+                        img_bytes = requests.get(f"https://api.telegram.org/file/bot{token}/{file_path}").content
+                        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+                        
+                        # Process with Vision model
+                        from butler.agent.provider import NvidiaProvider
+                        vision_prov = NvidiaProvider(api_keys=config.nvidia_api_keys, model=config.vision_model)
+                        prompt_text = caption if caption else "Describe this image in detail."
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt_text},
+                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
+                                ]
+                            }
+                        ]
+                        try:
+                            vision_desc = vision_prov.chat(messages)
+                            query = f"[System Note: The user uploaded an image. Visual analysis: {vision_desc}]"
+                            if caption:
+                                query += f"\nUser's caption: {caption}"
+                        except Exception as e:
+                            query = f"[System Note: The user uploaded an image, but the vision model failed to process it: {str(e)}]"
+                            if caption:
+                                query += f"\nUser's caption: {caption}"
+                    else:
+                        query = "[System Note: The user uploaded an image, but I could not download it from Telegram.]"
+                        
+                else:
+                    query = body["message"].get("text", "")
                 
             else:
                 query = body.get("query", "")
