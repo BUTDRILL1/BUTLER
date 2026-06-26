@@ -3,6 +3,7 @@ import json
 import re
 import sys
 import os
+import time
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 
@@ -136,6 +137,12 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             config = load_config()
+            
+            # Ensure Vercel knows the timezone
+            if hasattr(time, "tzset") and config.timezone:
+                os.environ["TZ"] = config.timezone
+                time.tzset()
+                
             db = ButlerDB.open(config)
             
             # Security check for Telegram

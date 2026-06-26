@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from http.server import BaseHTTPRequestHandler
 from butler.config import load_config
 from butler.db import ButlerDB
@@ -8,6 +10,12 @@ class handler(BaseHTTPRequestHandler):
         import requests
         try:
             config = load_config()
+            
+            # Ensure Vercel knows the timezone
+            if hasattr(time, "tzset") and config.timezone:
+                os.environ["TZ"] = config.timezone
+                time.tzset()
+                
             db = ButlerDB.open(config)
             
             chat_id_to_use = config.telegram_chat_id
