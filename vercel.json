@@ -1,14 +1,7 @@
 {
-  "version": 2,
   "functions": {
     "api/butler.py": {
       "maxDuration": 300
     }
-  },
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "api/butler.py"
-    }
-  ]
+  }
 }
