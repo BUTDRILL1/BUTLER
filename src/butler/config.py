@@ -147,7 +147,7 @@ class ButlerConfig(BaseModel):
 
     telegram_bot_token: str = Field(default_factory=lambda: os.getenv("BUTLER_TELEGRAM_BOT_TOKEN", ""))
     telegram_allowed_user: str = Field(default_factory=lambda: os.getenv("BUTLER_TELEGRAM_ALLOWED_USER", ""))
-    telegram_chat_id: int | None = None
+    telegram_chat_id: str | None = Field(default_factory=lambda: os.getenv("BUTLER_TELEGRAM_CHAT_ID", None))
 
     github_token: str = Field(default_factory=lambda: os.getenv("BUTLER_GITHUB_TOKEN", ""))
 
@@ -180,6 +180,7 @@ def load_config() -> ButlerConfig:
         ("spotify_client_secret", "BUTLER_SPOTIFY_CLIENT_SECRET"),
         ("telegram_bot_token", "BUTLER_TELEGRAM_BOT_TOKEN"),
         ("telegram_allowed_user", "BUTLER_TELEGRAM_ALLOWED_USER"),
+        ("telegram_chat_id", "BUTLER_TELEGRAM_CHAT_ID"),
         ("model", "BUTLER_MODEL"),
         ("chat_model", "BUTLER_CHAT_MODEL"),
         ("vision_model", "BUTLER_VISION_MODEL"),

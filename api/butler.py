@@ -145,8 +145,6 @@ class handler(BaseHTTPRequestHandler):
                     self.send_response(200)
                     self.end_headers()
                     return
-                # Store the authorized chat_id in the DB for Cron jobs to use
-                db.set_property("telegram_chat_id", str(chat_id))
 
             from butler.agent.provider import AnthropicProvider, GeminiProvider, NvidiaProvider, OllamaProvider
             if config.provider == "gemini":
